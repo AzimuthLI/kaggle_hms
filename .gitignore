@@ -1,9 +1,9 @@
 # large dataset files
 test.csv 
-test_eggs/
+test_eegs/
 test_spectrograms/
 train.csv 
-train_eggs/
+train_eegs/
 train_spectrograms/
 sample_submission.csv
 example_figures/
