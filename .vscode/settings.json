@@ -1,0 +1,10 @@
+{
+    "cSpell.words": [
+        "dtype",
+        "nunique",
+        "test_dtypes"
+    ],
+    "cSpell.enableFiletypes": [
+        "!python"
+    ]
+}
