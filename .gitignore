@@ -7,6 +7,7 @@ train_eegs/
 train_spectrograms/
 sample_submission.csv
 example_figures/
+*.parquet
 
 .DS_Store
 
