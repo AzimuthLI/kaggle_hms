@@ -1,12 +1,12 @@
 # large dataset files
 test.csv 
-test_eggs/ 
+test_eggs/
 test_spectrograms/
 train.csv 
 train_eggs/
 train_spectrograms/
 sample_submission.csv
-example_figures/ 
+example_figures/
 
 .DS_Store
 
