@@ -8,6 +8,8 @@ train_spectrograms/
 sample_submission.csv
 example_figures/
 *.parquet
+inputs/
+outputs/
 
 .DS_Store
 
