@@ -327,7 +327,11 @@ def validate_epoch(valid_loader, model, criterion, device, config):
     return losses.avg, prediction_dict
 
 
-def train_loop(model, train_loader, valid_loader, config):
+def train_loop(train_loader, valid_loader, config):
+
+    # Create the model
+    model = CustomModel(ModelConfig, num_classes=6, pretrained=True)
+    model.to(DEVICE)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.1, weight_decay=config.WEIGHT_DECAY)
     scheduler = OneCycleLR(
@@ -345,6 +349,11 @@ def train_loop(model, train_loader, valid_loader, config):
 
     best_model = None
 
+    loss_records = {
+        "train": [],
+        "valid": []
+    }
+
     for epoch in range(config.EPOCHS):
         start_time = time.time()
         avg_train_loss = train_epoch(train_loader, model, criterion, optimizer, epoch, scheduler, DEVICE, config)
@@ -354,11 +363,14 @@ def train_loop(model, train_loader, valid_loader, config):
         info = f"Epoch {epoch+1} - avg_train_loss: {avg_train_loss:.4f}  avg_val_loss: {avg_val_loss:.4f} time: {elapsed:.0f}s"
         print(f"{'-'*100}\n{info}\n{'-'*100}")
 
+        loss_records['train'].append(avg_train_loss)
+        loss_records['valid'].append(avg_val_loss)
+
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             best_model = model
 
-    return best_model, prediction_dict
+    return best_model, prediction_dict, loss_records
 
 
 def get_result(oof_df, label_cols, target_preds):
@@ -437,10 +449,7 @@ if __name__ == "__main__":
         
         del X, y, dataloader, dataset
 
-
-    # Create the model
-    model = CustomModel(ModelConfig, num_classes=6, pretrained=True)
-    model.to(DEVICE)
+    # ======== K-FOLD Training ==========
 
     # k-fold cross-validation
     gkf = GroupKFold(n_splits=ModelConfig.FOLDS)
@@ -477,7 +486,16 @@ if __name__ == "__main__":
         train_loader = DataLoader(train_dataset, drop_last=True, **loader_kwargs)
         valid_loader = DataLoader(valid_dataset, drop_last=False, **loader_kwargs)
 
-        best_model, prediction_dict = train_loop(model, train_loader, valid_loader, ModelConfig)
+        best_model, prediction_dict, loss_records = train_loop(train_loader, valid_loader, ModelConfig)
+
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        ax.plot(loss_records['train'], label="Train Loss")
+        ax.plot(loss_records['valid'], label="Valid Loss")
+        ax.set_xlabel("Epochs")
+        ax.set_ylabel("Loss")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(f"{paths.OUTPUT_DIR}/fold_{fold}_loss.png")
 
         # Save the model
         save_name = f"{paths.OUTPUT_DIR}/{ModelConfig.MODEL}_fold_{fold}_{ModelConfig.MODEL_POSTFIX}.pth"
