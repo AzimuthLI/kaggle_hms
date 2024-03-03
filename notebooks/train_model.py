@@ -14,12 +14,16 @@ import pandas as pd
 from glob import glob
 from tqdm import tqdm
 from typing import Dict, List
+from sklearn.model_selection import KFold, GroupKFold
 
 # PyTorch imports
 import torch
 import torch.nn as nn
 import timm
 from torch.utils.data import DataLoader, Dataset
+from torch.cuda.amp import autocast, GradScaler
+import torch.nn.functional as F
+from torch.optim.lr_scheduler import OneCycleLR
 
 # Local imports
 from config_model import ModelConfig, KagglePaths, LocalPaths
@@ -38,13 +42,14 @@ def seed_everything(seed: int):
     os.environ['PYTHONHASHSEED'] = str(seed) 
 
 
-def get_logger(filename=paths.OUTPUT_DIR):
+def get_logger(log_dir):
     from logging import getLogger, INFO, StreamHandler, FileHandler, Formatter
+    filename = os.path.join(log_dir, "train.log")
     logger = getLogger(__name__)
     logger.setLevel(INFO)
     handler1 = StreamHandler()
     handler1.setFormatter(Formatter("%(message)s"))
-    handler2 = FileHandler(filename=f"{filename}.log")
+    handler2 = FileHandler(filename=filename, mode="a+")
     handler2.setFormatter(Formatter("%(message)s"))
     logger.addHandler(handler1)
     logger.addHandler(handler2)
@@ -67,42 +72,6 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
-
-
-def plot_spectrogram(spectrogram_path: str):
-    """
-    Source: https://www.kaggle.com/code/mvvppp/hms-eda-and-domain-journey
-    Visualize spectogram recordings from a parquet file.
-    :param spectrogram_path: path to the spectogram parquet.
-    """
-    sample_spect = pd.read_parquet(spectrogram_path)
-    
-    split_spect = {
-        "LL": sample_spect.filter(regex='^LL', axis=1),
-        "RL": sample_spect.filter(regex='^RL', axis=1),
-        "RP": sample_spect.filter(regex='^RP', axis=1),
-        "LP": sample_spect.filter(regex='^LP', axis=1),
-    }
-    
-    fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(12, 8))
-    axes = axes.flatten()
-    label_interval = 5
-    for i, split_name in enumerate(split_spect.keys()):
-        ax = axes[i]
-        img = ax.imshow(np.log(split_spect[split_name]).T, cmap='viridis', aspect='auto', origin='lower')
-        cbar = fig.colorbar(img, ax=ax)
-        cbar.set_label('Log(Value)')
-        ax.set_title(split_name)
-        ax.set_ylabel("Frequency (Hz)")
-        ax.set_xlabel("Time")
-
-        ax.set_yticks(np.arange(len(split_spect[split_name].columns)))
-        ax.set_yticklabels([column_name[3:] for column_name in split_spect[split_name].columns])
-        frequencies = [column_name[3:] for column_name in split_spect[split_name].columns]
-        ax.set_yticks(np.arange(0, len(split_spect[split_name].columns), label_interval))
-        ax.set_yticklabels(frequencies[::label_interval])
-    plt.tight_layout()
-    plt.show()
 
 
 def get_non_overlap(df_csv, targets):
@@ -182,7 +151,7 @@ class CustomDataset(Dataset):
         img_list = [] 
         if self.spectograms:
             for region in range(4):
-                img = np.empty((128, 256), dtype='float32')
+                img = np.zeros((128, 256), dtype='float32')
 
                 spectrogram = self.spectograms[row['spectrogram_id']][r:r+300, region*100:(region+1)*100].T
                 spectrogram = self.__transform_spectrogram(spectrogram)
@@ -193,13 +162,14 @@ class CustomDataset(Dataset):
         if self.eeg_spectograms:
             img = self.eeg_spectograms[row['eeg_id']]
             img_list += [img[:, :, i] for i in range(4)]
-        
+
         # Arrange the data
         if self.data_arrange == 0:
             # --> [512, 512, 1]
             part_1 = np.concatenate(img_list[:4], axis=0)
             part_2 = np.concatenate(img_list[4:], axis=0)
             X = np.concatenate([part_1, part_2], axis=1)
+            X = np.expand_dims(X, axis=2)
         elif self.data_arrange == 1:
             # --> [256, 256, 4]
             part_1 = np.stack(img_list[:4], axis=2)
@@ -282,50 +252,170 @@ class CustomModel(nn.Module):
         x = self.custom_layers(x)
 
         return x
+
+
+def train_epoch(train_loader, model, criterion, optimizer, epoch, scheduler, device, config):
+
+    model.train()
+    scaler = GradScaler(enabled=config.AMP)
+    losses = AverageMeter()
+    global_step = 0
+    start = end = time.time()
+
+    with tqdm(train_loader, unit="train_batch", desc='Train') as tk0:
+        
+        for step, (X, y) in enumerate(tk0):
+            X, y = X.to(device), y.to(device)
+            
+            batch_size = y.size(0)
+
+            with autocast(enabled=config.AMP):
+                outputs = model(X)
+                loss = criterion(F.log_softmax(outputs, dim=1), y)
+
+            losses.update(loss.item(), batch_size)
+            scaler.scale(loss).backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.MAX_GRAD_NORM)
+            
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            global_step += 1
+            scheduler.step()
+
+            end = time.time()
+
+            if step % config.PRINT_FREQ == 0 or step == (len(train_loader)-1):
+                lr = scheduler.get_last_lr()[0]
+                info = f"Epoch: [{epoch+1}][{step}/{len(train_loader)}]"
+                info += f"Elapsed {(end-start):.2f}s Loss: {losses.avg:.4f} Grad: {grad_norm:.4f} LR: {lr:.8f}"
+                print(info)
+
+    return losses.avg
+
+
+def validate_epoch(valid_loader, model, criterion, device, config):
+
+    model.eval()
+    softmax = nn.Softmax(dim=1)
+    losses = AverageMeter()
+    start = end = time.time()
+
+    preds = []
+
+    with tqdm(valid_loader, unit="valid_batch", desc='Validation') as tk0:
+        for step, (X, y) in enumerate(tk0):
+            X = X.to(device)
+            y = y.to(device)
+            batch_size = y.size(0)
+
+            with torch.no_grad():
+                y_preds = model(X)
+                loss = criterion(F.log_softmax(y_preds, dim=1), y)
+
+            losses.update(loss.item(), batch_size)
+            preds.append(y_preds.to('cpu').numpy())
+            end = time.time()
+
+            # ========== LOG INFO ==========
+            if step % config.PRINT_FREQ == 0 or step == (len(valid_loader)-1):
+                info = f"EVAL: [{step}/{len(valid_loader)}] Elapsed {(end - start):.2f}s Loss: {losses.avg:.4f}"
+                print(info)
+
+    prediction_dict = {"predictions": np.concatenate(preds)}
+
+    return losses.avg, prediction_dict
+
+
+def train_loop(model, train_loader, valid_loader, config):
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.1, weight_decay=config.WEIGHT_DECAY)
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=1e-4,
+        epochs=config.EPOCHS,
+        steps_per_epoch=len(train_loader),
+        pct_start=0.1,
+        anneal_strategy="cos",
+        final_div_factor=100,
+    )
+
+    criterion = nn.KLDivLoss(reduction="batchmean")
+    best_loss = np.inf
+
+    best_model = None
+
+    for epoch in range(config.EPOCHS):
+        start_time = time.time()
+        avg_train_loss = train_epoch(train_loader, model, criterion, optimizer, epoch, scheduler, DEVICE, config)
+        avg_val_loss, prediction_dict = validate_epoch(valid_loader, model, criterion, DEVICE, config)
     
+        elapsed = time.time() - start_time
+        info = f"Epoch {epoch+1} - avg_train_loss: {avg_train_loss:.4f}  avg_val_loss: {avg_val_loss:.4f} time: {elapsed:.0f}s"
+        print(f"{'-'*100}\n{info}\n{'-'*100}")
+
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
+            best_model = model
+
+    return best_model, prediction_dict
+
+
+def get_result(oof_df, label_cols, target_preds):
+    kl_loss = nn.KLDivLoss(reduction="batchmean")
+    labels = torch.tensor(oof_df[label_cols].values)
+    preds = torch.tensor(oof_df[target_preds].values)
+    preds = F.log_softmax(preds, dim=1)
+    result = kl_loss(preds, labels)
+    return result
+
 
 if __name__ == "__main__":
+
+    target_preds = [x + "_pred" for x in ['seizure_vote', 'lpd_vote', 'gpd_vote', 'lrda_vote', 'grda_vote', 'other_vote']]
+    label_to_num = {'Seizure': 0, 'LPD': 1, 'GPD': 2, 'LRDA': 3, 'GRDA': 4, 'Other':5}
+    num_to_label = {v: k for k, v in label_to_num.items()}
 
     # Set the seed
     seed_everything(ModelConfig.SEED)
 
-    # Get the logger
-    logger = get_logger()
+    logger = get_logger(paths.OUTPUT_DIR)
 
     # Load the data
     train_csv = pd.read_csv(paths.TRAIN_CSV)
     TARGETS = train_csv.columns[-6:]
 
     # Get the non-overlapping data
-    df_train = get_non_overlap(train_csv, ModelConfig.TARGETS)
+    df_train = get_non_overlap(train_csv, TARGETS)
 
     all_specs = np.load(paths.PRE_LOADED_SPECTOGRAMS, allow_pickle=True).item()
     all_eeg_specs = np.load(paths.PRE_LOADED_EEGS, allow_pickle=True).item()
 
-    # Create the dataset
-    dataset = CustomDataset(
-        df_train,
-        TARGETS,
-        ModelConfig,
-        all_specs,
-        all_eeg_specs,
-        mode='train'
-    )
-
-    # Create the dataloader
-    dataloader = DataLoader(
-        dataset,
-        shuffle=False,
-        batch_size=ModelConfig.BATCH_SIZE,
-        num_workers=ModelConfig.NUM_WORKERS, 
-        pin_memory=True, 
-        drop_last=True
-    )
-
     if ModelConfig.VISUALIZE:
+
+        # Create the dataset
+        dataset = CustomDataset(
+            df_train,
+            TARGETS,
+            ModelConfig,
+            all_specs,
+            all_eeg_specs,
+            mode='train'
+        )
+
+        # Create the dataloader
+        dataloader = DataLoader(
+            dataset,
+            shuffle=False,
+            batch_size=ModelConfig.BATCH_SIZE,
+            num_workers=ModelConfig.NUM_WORKERS, 
+            pin_memory=True, 
+            drop_last=True
+        )
+
         visual_id = np.random.randint(0, len(df_train))
-        X, y = dataloader[visual_id]
-        print(X.shape, y.shape)
+        X, y = dataset[visual_id]
+        print(f"Input shape: {X.shape};\nTarget shape: {y.shape}")
 
         if X.shape[-1] == 1:
             fig, ax = plt.subplots(1, 1, figsize=(12, 6))
@@ -333,7 +423,7 @@ if __name__ == "__main__":
             plt.colorbar(im, ax=ax)
             fig.suptitle(f"ID={visual_id}; Target: {y}")
             fig.tight_layout()
-            plt.show()
+            fig.savefig(f"{paths.OUTPUT_DIR}/sample_spectrogram.png")
         elif X.shape[-1] == 4:
             fig, axes = plt.subplots(2, 2, figsize=(12, 6))
             for i, ax in enumerate(axes.flatten()):
@@ -341,10 +431,72 @@ if __name__ == "__main__":
                 plt.colorbar(im, ax=ax[i])
             fig.suptitle(f"ID={visual_id}; Target: {y}")
             fig.tight_layout()
-            plt.show()
+            fig.savefig(f"{paths.OUTPUT_DIR}/sample_spectrogram.png")
         else:
             raise ValueError(f"Data shape {X.shape} not supported")
         
-        del X, y
+        del X, y, dataloader, dataset
 
-    
+
+    # Create the model
+    model = CustomModel(ModelConfig, num_classes=6, pretrained=True)
+    model.to(DEVICE)
+
+    # k-fold cross-validation
+    gkf = GroupKFold(n_splits=ModelConfig.FOLDS)
+    for fold, (train_index, valid_index) in enumerate(gkf.split(df_train, df_train['target'], df_train['patient_id'])):
+        df_train.loc[valid_index, "fold"] = int(fold)
+
+    print("-"*100)
+    print("Validation set sizes")
+    print(df_train.groupby("fold").size())
+    print("-"*100)
+    print(df_train.head(10))
+
+    oof_df = pd.DataFrame()
+    for fold in range(ModelConfig.FOLDS):
+
+        logger.info(f"{'='*100}\nFold: {fold} training\n{'='*100}")
+        tik = time.time()
+
+        # ======== SPLIT ==========
+        train_folds = df_train[df_train['fold'] != fold].reset_index(drop=True)
+        valid_folds = df_train[df_train['fold'] == fold].reset_index(drop=True)
+        
+        # ======== DATASETS ==========
+        train_dataset = CustomDataset(train_folds, TARGETS, ModelConfig, all_specs, all_eeg_specs, mode="train")
+        valid_dataset = CustomDataset(valid_folds, TARGETS, ModelConfig, all_specs, all_eeg_specs, mode="train")
+        
+        # ======== DATALOADERS ==========
+        loader_kwargs = {
+            "batch_size": ModelConfig.BATCH_SIZE,
+            "num_workers": ModelConfig.NUM_WORKERS,
+            "pin_memory": True,
+            "shuffle": False,
+        }
+        train_loader = DataLoader(train_dataset, drop_last=True, **loader_kwargs)
+        valid_loader = DataLoader(valid_dataset, drop_last=False, **loader_kwargs)
+
+        best_model, prediction_dict = train_loop(model, train_loader, valid_loader, ModelConfig)
+
+        # Save the model
+        save_name = f"{paths.OUTPUT_DIR}/{ModelConfig.MODEL}_fold_{fold}_{ModelConfig.MODEL_POSTFIX}.pth"
+        torch.save(best_model.state_dict(), save_name)
+
+        valid_folds[target_preds] = prediction_dict['predictions']
+        oof_df = pd.concat([oof_df, valid_folds])
+
+        print(valid_folds.head())
+
+        del train_dataset, valid_dataset, train_loader, valid_loader
+
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        result = get_result(valid_folds, TARGETS, target_preds)
+        logger.info(f"{'='*100}\nFold {fold} Result: {result} Elapse: {(time.time()-tik) / 60:.2f} min \n{'='*100}")
+
+    oof_df = oof_df.reset_index(drop=True)
+    cv_result = get_result(oof_df, TARGETS, target_preds)
+    logger.info(f"{'='*100}\nCV: {cv_result}\n{'='*100}")
+    oof_df.to_csv(os.path.join(paths.OUTPUT_DIR, "oof_df.csv"), index=False)
