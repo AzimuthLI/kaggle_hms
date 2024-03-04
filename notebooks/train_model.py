@@ -104,14 +104,31 @@ def get_non_overlap(df_csv, targets):
     return train
 
 
+def transform_spectrogram(spectrogram):
+
+    # Log transform spectogram
+    spectrogram = np.clip(spectrogram, np.exp(-4), np.exp(8))
+    spectrogram = np.log(spectrogram)
+
+    # Standarize per image
+    ep = 1e-6
+    mu = np.nanmean(spectrogram.flatten())
+    std = np.nanstd(spectrogram.flatten())
+    spectrogram = (spectrogram-mu) / (std+ep)
+    spectrogram = np.nan_to_num(spectrogram, nan=0.0)
+        
+    return spectrogram
+
+
 class CustomDataset(Dataset):
+
     def __init__(
         self, 
         df: pd.DataFrame,
         label_cols: List[str],
         config,
-        specs: Dict[int, np.ndarray]=None,
-        eeg_specs: Dict[int, np.ndarray]=None,
+        all_specs: Dict[str, np.ndarray],
+        all_eegs: Dict[str, np.ndarray],
         mode: str = 'train',
     ): 
         self.df = df
@@ -119,8 +136,8 @@ class CustomDataset(Dataset):
         self.config = config
         self.batch_size = config.BATCH_SIZE
         self.mode = mode
-        self.spectograms = specs
-        self.eeg_spectograms = eeg_specs
+        self.spectrograms = all_specs
+        self.eeg_spectrograms = all_eegs
         self.data_arrange = config.DATA_ARRANGE
         
     def __len__(self):
@@ -140,41 +157,38 @@ class CustomDataset(Dataset):
         """
         Generates data containing batch_size samples.
         """
-
         row = self.df.iloc[index]
-        
         if self.mode=='test': 
             r = 0
         else: 
             r = int((row['min'] + row['max']) // 4)
+        
+        img_list = []
 
-        img_list = [] 
-        if self.spectograms:
-            for region in range(4):
-                img = np.zeros((128, 256), dtype='float32')
+        for region in range(4):
+            img = np.zeros((128, 256), dtype='float32')
 
-                spectrogram = self.spectograms[row['spectrogram_id']][r:r+300, region*100:(region+1)*100].T
-                spectrogram = self.__transform_spectrogram(spectrogram)
-                
-                img[14:-14, :] = spectrogram[:, 22:-22] / 2.0
-                img_list.append(img)
+            spectrogram = self.spectrograms[row['spectrogram_id']][r:r+300, region*100:(region+1)*100].T
+            spectrogram = transform_spectrogram(spectrogram)
+            
+            img[14:-14, :] = spectrogram[:, 22:-22] / 2.0
+            img_list.append(img)
 
-        if self.eeg_spectograms:
-            img = self.eeg_spectograms[row['eeg_id']]
-            img_list += [img[:, :, i] for i in range(4)]
+        img = self.eeg_spectrograms[row['eeg_id']]
+        img_list += [img[:, :, i] for i in range(4)]
 
         # Arrange the data
         if self.data_arrange == 0:
-            # --> [512, 512, 1]
+            # --> [3, 512, 512]
             part_1 = np.concatenate(img_list[:4], axis=0)
             part_2 = np.concatenate(img_list[4:], axis=0)
             X = np.concatenate([part_1, part_2], axis=1)
-            X = np.expand_dims(X, axis=2)
+            X = np.broadcast_to(X, (3, X.shape[0], X.shape[1]))
         elif self.data_arrange == 1:
-            # --> [256, 256, 4]
-            part_1 = np.stack(img_list[:4], axis=2)
-            part_2 = np.stack(img_list[4:], axis=2)
-            X = np.concatenate([part_1, part_2], axis=0)
+            # --> [4, 256, 256]
+            part_1 = np.stack(img_list[:4], axis=0)
+            part_2 = np.stack(img_list[4:], axis=0)
+            X = np.concatenate([part_1, part_2], axis=1)
         else:
             raise ValueError(f"Data arrangement {self.data_arrange} not supported")
                 
@@ -185,21 +199,6 @@ class CustomDataset(Dataset):
 
         return X, y
 
-    def __transform_spectrogram(self, spectrogram):
-
-        # Log transform spectogram
-        spectrogram = np.clip(spectrogram, np.exp(-4), np.exp(8))
-        spectrogram = np.log(spectrogram)
-
-        # Standarize per image
-        ep = 1e-6
-        mu = np.nanmean(spectrogram.flatten())
-        std = np.nanstd(spectrogram.flatten())
-        spectrogram = (spectrogram-mu) / (std+ep)
-        spectrogram = np.nan_to_num(spectrogram, nan=0.0)
-            
-        return spectrogram
-    
 
 class CustomModel(nn.Module):
 
@@ -230,20 +229,8 @@ class CustomModel(nn.Module):
             nn.Flatten(),
             nn.Linear(self.model.num_features, num_classes)
         )
-
-    def __reshape_input(self, x):
-
-        if x.shape[-1] == 1:
-            x = torch.cat([x, x, x], dim=3)
-            x = x.permute(0, 3, 1, 2)
-        else:
-            x = torch.tensor(x).permute(0, 3, 1, 2)
-        
-        return x
     
     def forward(self, x):
-
-        x = self.__reshape_input(x)
 
         if x.shape[1] == 4:
             x = self.preprocess(x)
@@ -327,7 +314,7 @@ def validate_epoch(valid_loader, model, criterion, device, config):
     return losses.avg, prediction_dict
 
 
-def train_loop(train_loader, valid_loader, config):
+def train_loop(train_loader, valid_loader, config, logger):
 
     # Create the model
     model = CustomModel(ModelConfig, num_classes=6, pretrained=True)
@@ -361,6 +348,7 @@ def train_loop(train_loader, valid_loader, config):
     
         elapsed = time.time() - start_time
         info = f"Epoch {epoch+1} - avg_train_loss: {avg_train_loss:.4f}  avg_val_loss: {avg_val_loss:.4f} time: {elapsed:.0f}s"
+        logger.info(info)
         print(f"{'-'*100}\n{info}\n{'-'*100}")
 
         loss_records['train'].append(avg_train_loss)
@@ -401,19 +389,13 @@ if __name__ == "__main__":
     df_train = get_non_overlap(train_csv, TARGETS)
 
     all_specs = np.load(paths.PRE_LOADED_SPECTOGRAMS, allow_pickle=True).item()
-    all_eeg_specs = np.load(paths.PRE_LOADED_EEGS, allow_pickle=True).item()
+    all_eegs = np.load(paths.PRE_LOADED_EEGS, allow_pickle=True).item()
+
 
     if ModelConfig.VISUALIZE:
 
         # Create the dataset
-        dataset = CustomDataset(
-            df_train,
-            TARGETS,
-            ModelConfig,
-            all_specs,
-            all_eeg_specs,
-            mode='train'
-        )
+        dataset = CustomDataset(df_train, TARGETS, ModelConfig, all_specs, all_eegs, mode='train')
 
         # Create the dataloader
         dataloader = DataLoader(
@@ -425,22 +407,22 @@ if __name__ == "__main__":
             drop_last=True
         )
 
-        visual_id = np.random.randint(0, len(df_train))
+        visual_id = 108 #np.random.randint(0, len(df_train))
         X, y = dataset[visual_id]
         print(f"Input shape: {X.shape};\nTarget shape: {y.shape}")
 
-        if X.shape[-1] == 1:
+        if X.shape[0] == 3:
             fig, ax = plt.subplots(1, 1, figsize=(12, 6))
-            im = ax.imshow(X[:, :, 0], cmap='viridis')
+            im = ax.imshow(X[0, :, :], cmap='viridis')
             plt.colorbar(im, ax=ax)
             fig.suptitle(f"ID={visual_id}; Target: {y}")
             fig.tight_layout()
             fig.savefig(f"{paths.OUTPUT_DIR}/sample_spectrogram.png")
-        elif X.shape[-1] == 4:
+        elif X.shape[0] == 4:
             fig, axes = plt.subplots(2, 2, figsize=(12, 6))
             for i, ax in enumerate(axes.flatten()):
-                im = ax[i].imshow(X[:, :, i], cmap='viridis')
-                plt.colorbar(im, ax=ax[i])
+                im = ax.imshow(X[i, :, :], cmap='viridis')
+                plt.colorbar(im, ax=ax)
             fig.suptitle(f"ID={visual_id}; Target: {y}")
             fig.tight_layout()
             fig.savefig(f"{paths.OUTPUT_DIR}/sample_spectrogram.png")
@@ -448,6 +430,9 @@ if __name__ == "__main__":
             raise ValueError(f"Data shape {X.shape} not supported")
         
         del X, y, dataloader, dataset
+
+        torch.cuda.empty_cache()
+        gc.collect()
 
     # ======== K-FOLD Training ==========
 
@@ -473,8 +458,8 @@ if __name__ == "__main__":
         valid_folds = df_train[df_train['fold'] == fold].reset_index(drop=True)
         
         # ======== DATASETS ==========
-        train_dataset = CustomDataset(train_folds, TARGETS, ModelConfig, all_specs, all_eeg_specs, mode="train")
-        valid_dataset = CustomDataset(valid_folds, TARGETS, ModelConfig, all_specs, all_eeg_specs, mode="train")
+        train_dataset =  CustomDataset(train_folds, TARGETS, ModelConfig, all_specs, all_eegs, mode="train")
+        valid_dataset =  CustomDataset(valid_folds, TARGETS, ModelConfig, all_specs, all_eegs, mode="train")
         
         # ======== DATALOADERS ==========
         loader_kwargs = {
@@ -486,13 +471,14 @@ if __name__ == "__main__":
         train_loader = DataLoader(train_dataset, drop_last=True, **loader_kwargs)
         valid_loader = DataLoader(valid_dataset, drop_last=False, **loader_kwargs)
 
-        best_model, prediction_dict, loss_records = train_loop(train_loader, valid_loader, ModelConfig)
+        best_model, prediction_dict, loss_records = train_loop(train_loader, valid_loader, ModelConfig, logger)
 
         fig, ax = plt.subplots(1, 1, figsize=(8, 6))
         ax.plot(loss_records['train'], label="Train Loss")
         ax.plot(loss_records['valid'], label="Valid Loss")
         ax.set_xlabel("Epochs")
         ax.set_ylabel("Loss")
+        ax.set_title(f"Fold {fold} Training Loss")
         ax.legend()
         fig.tight_layout()
         fig.savefig(f"{paths.OUTPUT_DIR}/fold_{fold}_loss.png")
