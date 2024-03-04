@@ -177,20 +177,7 @@ class CustomDataset(Dataset):
         img = self.eeg_spectrograms[row['eeg_id']]
         img_list += [img[:, :, i] for i in range(4)]
 
-        # Arrange the data
-        if self.data_arrange == 0:
-            # --> [3, 512, 512]
-            part_1 = np.concatenate(img_list[:4], axis=0)
-            part_2 = np.concatenate(img_list[4:], axis=0)
-            X = np.concatenate([part_1, part_2], axis=1)
-            X = np.broadcast_to(X, (3, X.shape[0], X.shape[1]))
-        elif self.data_arrange == 1:
-            # --> [4, 256, 256]
-            part_1 = np.stack(img_list[:4], axis=0)
-            part_2 = np.stack(img_list[4:], axis=0)
-            X = np.concatenate([part_1, part_2], axis=1)
-        else:
-            raise ValueError(f"Data arrangement {self.data_arrange} not supported")
+        X = np.stack(img_list, axis=2)
                 
         if self.mode == 'train':
             y = row[self.label_cols].values.astype(np.float32)
@@ -205,17 +192,12 @@ class CustomModel(nn.Module):
     def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
         super(CustomModel, self).__init__()
 
-        self.USE_KAGGLE_SPECTROGRAMS = config.USE_KAGGLE_SPECTROGRAMS
-        self.USE_EEG_SPECTROGRAMS = config.USE_EEG_SPECTROGRAMS
-
         self.model = timm.create_model(
             config.MODEL,
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
         )
-        
-        self.preprocess = torch.nn.Conv2d(4, 3, 1, bias=True)
         
         if config.FREEZE:
             for i,(name, param) in enumerate(list(self.model.named_parameters())\
@@ -230,14 +212,21 @@ class CustomModel(nn.Module):
             nn.Linear(self.model.num_features, num_classes)
         )
     
+    def __reshape_input(self, x):
+        # input size: [batch * 128 * 256 * 8]
+        # output size: [batch * 3 * 512 * 512]
+        spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
+        eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
+        x = torch.cat([spectograms, eegs], dim=2)
+        x = torch.cat([x, x, x], dim=3)
+        x = x.permute(0, 3, 1, 2)
+        
+        return x
+    
     def forward(self, x):
-
-        if x.shape[1] == 4:
-            x = self.preprocess(x)
-
+        x = self.__reshape_input(x)
         x = self.features(x)
         x = self.custom_layers(x)
-
         return x
 
 
@@ -375,11 +364,20 @@ if __name__ == "__main__":
     target_preds = [x + "_pred" for x in ['seizure_vote', 'lpd_vote', 'gpd_vote', 'lrda_vote', 'grda_vote', 'other_vote']]
     label_to_num = {'Seizure': 0, 'LPD': 1, 'GPD': 2, 'LRDA': 3, 'GRDA': 4, 'Other':5}
     num_to_label = {v: k for k, v in label_to_num.items()}
+    
+    torch.cuda.empty_cache()
+    gc.collect()
 
     # Set the seed
     seed_everything(ModelConfig.SEED)
 
     logger = get_logger(paths.OUTPUT_DIR)
+    
+    logger.info(f"\nScript Start: {time.ctime()}")
+    logger.info(f"Model: {ModelConfig.MODEL}")
+    logger.info(f"Model Postfix: {ModelConfig.MODEL_POSTFIX}")
+    logger.info(f"Data Arrange: {ModelConfig.DATA_ARRANGE}")
+    logger.info(f"Output Dir: {paths.OUTPUT_DIR}")
 
     # Load the data
     train_csv = pd.read_csv(paths.TRAIN_CSV)
@@ -390,7 +388,6 @@ if __name__ == "__main__":
 
     all_specs = np.load(paths.PRE_LOADED_SPECTOGRAMS, allow_pickle=True).item()
     all_eegs = np.load(paths.PRE_LOADED_EEGS, allow_pickle=True).item()
-
 
     if ModelConfig.VISUALIZE:
 
@@ -411,23 +408,13 @@ if __name__ == "__main__":
         X, y = dataset[visual_id]
         print(f"Input shape: {X.shape};\nTarget shape: {y.shape}")
 
-        if X.shape[0] == 3:
-            fig, ax = plt.subplots(1, 1, figsize=(12, 6))
-            im = ax.imshow(X[0, :, :], cmap='viridis')
-            plt.colorbar(im, ax=ax)
-            fig.suptitle(f"ID={visual_id}; Target: {y}")
-            fig.tight_layout()
-            fig.savefig(f"{paths.OUTPUT_DIR}/sample_spectrogram.png")
-        elif X.shape[0] == 4:
-            fig, axes = plt.subplots(2, 2, figsize=(12, 6))
-            for i, ax in enumerate(axes.flatten()):
-                im = ax.imshow(X[i, :, :], cmap='viridis')
-                plt.colorbar(im, ax=ax)
-            fig.suptitle(f"ID={visual_id}; Target: {y}")
-            fig.tight_layout()
-            fig.savefig(f"{paths.OUTPUT_DIR}/sample_spectrogram.png")
-        else:
-            raise ValueError(f"Data shape {X.shape} not supported")
+        fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+        for i, ax in enumerate(axes.flatten()):
+            im = ax.imshow(X[:, :, i], cmap="viridis")
+            plt.colorbar(im, ax=ax, orientation='horizontal')
+        
+        fig.tight_layout()
+        fig.savefig(f"{paths.OUTPUT_DIR}/sample_input.png")
         
         del X, y, dataloader, dataset
 
@@ -473,6 +460,8 @@ if __name__ == "__main__":
 
         best_model, prediction_dict, loss_records = train_loop(train_loader, valid_loader, ModelConfig, logger)
 
+        name_stem = f"{ModelConfig.MODEL}_fold_{fold}_{ModelConfig.MODEL_POSTFIX}"
+        
         fig, ax = plt.subplots(1, 1, figsize=(8, 6))
         ax.plot(loss_records['train'], label="Train Loss")
         ax.plot(loss_records['valid'], label="Valid Loss")
@@ -481,16 +470,14 @@ if __name__ == "__main__":
         ax.set_title(f"Fold {fold} Training Loss")
         ax.legend()
         fig.tight_layout()
-        fig.savefig(f"{paths.OUTPUT_DIR}/fold_{fold}_loss.png")
+        fig.savefig(f"{paths.OUTPUT_DIR}/{name_stem}_loss.png")
 
         # Save the model
-        save_name = f"{paths.OUTPUT_DIR}/{ModelConfig.MODEL}_fold_{fold}_{ModelConfig.MODEL_POSTFIX}.pth"
+        save_name = f"{paths.OUTPUT_DIR}/{name_stem}.pth"
         torch.save(best_model.state_dict(), save_name)
 
         valid_folds[target_preds] = prediction_dict['predictions']
         oof_df = pd.concat([oof_df, valid_folds])
-
-        print(valid_folds.head())
 
         del train_dataset, valid_dataset, train_loader, valid_loader
 

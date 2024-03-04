@@ -1,15 +1,15 @@
 class ModelConfig:
     AMP = True
-    BATCH_SIZE = 32
+    BATCH_SIZE = 20
     EPOCHS = 6
     FOLDS = 5
     USE_KAGGLE_SPECTROGRAMS = True
     USE_EEG_SPECTROGRAMS = True
-    DATA_ARRANGE = 1 # 0: [512, 512, 1], 1: [256, 256, 4]
+    DATA_ARRANGE = 0 # 0: [512, 512, 1], 1: [256, 256, 4]
     FREEZE = False
     MAX_GRAD_NORM = 1e7
     MODEL = "tf_efficientnet_b2" #"tf_efficientnet_b0"
-    MODEL_POSTFIX = "preload_db"  
+    MODEL_POSTFIX = "flat"  
     NUM_FROZEN_LAYERS = 39
     NUM_WORKERS = 0 # multiprocessing.cpu_count()
     PRINT_FREQ = 50
