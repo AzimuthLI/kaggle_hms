@@ -177,7 +177,7 @@ def validate_epoch(valid_loader, model, criterion, device, config):
     return losses.avg, prediction_dict
 
 
-def train_loop(train_loader, valid_loader, config, logger):
+def train_fold(train_loader, valid_loader, config, logger):
 
     # Create the model
     model = CustomModel(ModelConfig, num_classes=6, pretrained=True)
@@ -233,7 +233,80 @@ def get_result(oof_df, label_cols, target_preds):
     return result
 
 
+def train_model(df_train, targets, config, paths, logger):
+
+    # k-fold cross-validation
+    gkf = GroupKFold(n_splits=config.FOLDS)
+    for fold, (train_index, valid_index) in enumerate(gkf.split(df_train, df_train['target'], df_train['patient_id'])):
+        df_train.loc[valid_index, "fold"] = int(fold)
+
+    print("-"*100)
+    print("Validation set sizes")
+    print(df_train.groupby("fold").size())
+    print("-"*100)
+    print(df_train.head(10))
+
+    oof_df = pd.DataFrame()
+    for fold in range(config.FOLDS):
+
+        logger.info(f"{'='*100}\nFold: {fold} training\n{'='*100}")
+        tik = time.time()
+
+        # ======== SPLIT ==========
+        train_folds = df_train[df_train['fold'] != fold].reset_index(drop=True)
+        valid_folds = df_train[df_train['fold'] == fold].reset_index(drop=True)
+        
+        # ======== DATASETS ==========
+        train_dataset = CustomDataset(train_folds, targets, config, all_specs, all_eegs, mode="train")
+        valid_dataset = CustomDataset(valid_folds, targets, config, all_specs, all_eegs, mode="train")
+        
+        # ======== DATALOADERS ==========
+        loader_kwargs = {
+            "batch_size": config.BATCH_SIZE,
+            "num_workers": config.NUM_WORKERS,
+            "pin_memory": True,
+            "shuffle": False,
+        }
+        train_loader = DataLoader(train_dataset, drop_last=True, **loader_kwargs)
+        valid_loader = DataLoader(valid_dataset, drop_last=False, **loader_kwargs)
+
+        best_model, prediction_dict, loss_records = train_fold(train_loader, valid_loader, config, logger)
+
+        name_stem = f"{config.MODEL}_fold_{fold}_{config.MODEL_POSTFIX}"
+        
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        ax.plot(loss_records['train'], label="Train Loss")
+        ax.plot(loss_records['valid'], label="Valid Loss")
+        ax.set_xlabel("Epochs")
+        ax.set_ylabel("Loss")
+        ax.set_title(f"Fold {fold} Training Loss")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(f"{paths.OUTPUT_DIR}/{name_stem}_loss.png")
+
+        # Save the model
+        save_name = f"{paths.OUTPUT_DIR}/{name_stem}.pth"
+        torch.save(best_model.state_dict(), save_name)
+
+        valid_folds[target_preds] = prediction_dict['predictions']
+        oof_df = pd.concat([oof_df, valid_folds])
+
+        del train_dataset, valid_dataset, train_loader, valid_loader
+
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        result = get_result(valid_folds, TARGETS, target_preds)
+        logger.info(f"{'='*100}\nFold {fold} Result: {result} Elapse: {(time.time()-tik) / 60:.2f} min \n{'='*100}")
+
+    return oof_df
+
+
 if __name__ == "__main__":
+
+    Train_Flag = True
+
+    total_start = time.time()
 
     target_preds = [x + "_pred" for x in ['seizure_vote', 'lpd_vote', 'gpd_vote', 'lrda_vote', 'grda_vote', 'other_vote']]
     label_to_num = {'Seizure': 0, 'LPD': 1, 'GPD': 2, 'LRDA': 3, 'GRDA': 4, 'Other':5}
@@ -297,71 +370,16 @@ if __name__ == "__main__":
 
     # ======== K-FOLD Training ==========
 
-    # k-fold cross-validation
-    gkf = GroupKFold(n_splits=ModelConfig.FOLDS)
-    for fold, (train_index, valid_index) in enumerate(gkf.split(df_train, df_train['target'], df_train['patient_id'])):
-        df_train.loc[valid_index, "fold"] = int(fold)
+    if Train_Flag:
+        oof_df = train_model(df_train, TARGETS, ModelConfig, paths, logger)
+        oof_df = oof_df.reset_index(drop=True)
+        oof_df.to_csv(os.path.join(paths.OUTPUT_DIR, "oof_df.csv"), index=False)
 
-    print("-"*100)
-    print("Validation set sizes")
-    print(df_train.groupby("fold").size())
-    print("-"*100)
-    print(df_train.head(10))
+    else:
+        oof_csv = os.path.join(paths.OUTPUT_DIR, "oof_df.csv")
+        if os.path.isfile(oof_csv):    
+            oof_df = pd.read_csv(os.path.join(paths.OUTPUT_DIR, "oof_df.csv"))
 
-    oof_df = pd.DataFrame()
-    for fold in range(ModelConfig.FOLDS):
-
-        logger.info(f"{'='*100}\nFold: {fold} training\n{'='*100}")
-        tik = time.time()
-
-        # ======== SPLIT ==========
-        train_folds = df_train[df_train['fold'] != fold].reset_index(drop=True)
-        valid_folds = df_train[df_train['fold'] == fold].reset_index(drop=True)
-        
-        # ======== DATASETS ==========
-        train_dataset =  CustomDataset(train_folds, TARGETS, ModelConfig, all_specs, all_eegs, mode="train")
-        valid_dataset =  CustomDataset(valid_folds, TARGETS, ModelConfig, all_specs, all_eegs, mode="train")
-        
-        # ======== DATALOADERS ==========
-        loader_kwargs = {
-            "batch_size": ModelConfig.BATCH_SIZE,
-            "num_workers": ModelConfig.NUM_WORKERS,
-            "pin_memory": True,
-            "shuffle": False,
-        }
-        train_loader = DataLoader(train_dataset, drop_last=True, **loader_kwargs)
-        valid_loader = DataLoader(valid_dataset, drop_last=False, **loader_kwargs)
-
-        best_model, prediction_dict, loss_records = train_loop(train_loader, valid_loader, ModelConfig, logger)
-
-        name_stem = f"{ModelConfig.MODEL}_fold_{fold}_{ModelConfig.MODEL_POSTFIX}"
-        
-        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-        ax.plot(loss_records['train'], label="Train Loss")
-        ax.plot(loss_records['valid'], label="Valid Loss")
-        ax.set_xlabel("Epochs")
-        ax.set_ylabel("Loss")
-        ax.set_title(f"Fold {fold} Training Loss")
-        ax.legend()
-        fig.tight_layout()
-        fig.savefig(f"{paths.OUTPUT_DIR}/{name_stem}_loss.png")
-
-        # Save the model
-        save_name = f"{paths.OUTPUT_DIR}/{name_stem}.pth"
-        torch.save(best_model.state_dict(), save_name)
-
-        valid_folds[target_preds] = prediction_dict['predictions']
-        oof_df = pd.concat([oof_df, valid_folds])
-
-        del train_dataset, valid_dataset, train_loader, valid_loader
-
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        result = get_result(valid_folds, TARGETS, target_preds)
-        logger.info(f"{'='*100}\nFold {fold} Result: {result} Elapse: {(time.time()-tik) / 60:.2f} min \n{'='*100}")
-
-    oof_df = oof_df.reset_index(drop=True)
     cv_result = get_result(oof_df, TARGETS, target_preds)
-    logger.info(f"{'='*100}\nCV: {cv_result}\n{'='*100}")
-    oof_df.to_csv(os.path.join(paths.OUTPUT_DIR, "oof_df.csv"), index=False)
+    logger.info(f"{'='*100}\nCV: {cv_result:.8f} Total Running: {(time.time() - total_start) / 60} min\n{'='*100}")
+    
