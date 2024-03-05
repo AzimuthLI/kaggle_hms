@@ -309,13 +309,14 @@ def train_model(df_train, targets, config, paths, logger):
 
         name_stem = f"{config.MODEL}_fold_{fold}_{config.MODEL_POSTFIX}"
         
-        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        fig, ax = plt.subplots(1, 1, figsize=(5, 4))
         ax.plot(loss_records['train'], label="Train Loss")
         ax.plot(loss_records['valid'], label="Valid Loss")
         ax.set_xlabel("Epochs")
         ax.set_ylabel("Loss")
         ax.set_title(f"Fold {fold} Training Loss")
         ax.legend()
+        ax.grid(True)
         fig.tight_layout()
         fig.savefig(f"{paths.OUTPUT_DIR}/{name_stem}_loss.png")
 
