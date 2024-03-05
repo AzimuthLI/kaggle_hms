@@ -234,7 +234,7 @@ if __name__ == "__main__":
     predictions = []
     for model_weight in model_weights:
 
-        test_dataset = CustomDataset(test_df, TARGET_COLS, ModelConfig, all_spectrograms, all_eegs, mode="test")
+        test_dataset = CustomDataset(test_df, TARGET_COLS, ModelConfig, all_spectrograms, all_eegs, augment=False, mode="test" )
         test_loader = DataLoader(
             test_dataset,
             batch_size=ModelConfig.BATCH_SIZE,
