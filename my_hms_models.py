@@ -1,5 +1,4 @@
-# %% [code]
-# %% [code]
+
 import numpy as np
 import pandas as pd
 from typing import List, Dict
@@ -7,8 +6,69 @@ from typing import List, Dict
 import torch
 from torch.utils.data import Dataset
 import torch.nn as nn
-
+from torchvision.transforms import v2
 import timm
+import random
+
+
+class MyXYMasking(nn.Module):
+
+    def __init__(self, mask_ratio=0.1, max_mask_num=2):
+        super(MyXYMasking, self).__init__()
+        self.mask_ratio = mask_ratio
+        self.max_mask_num = max_mask_num
+    
+    def forward(self, image):
+    
+        # Assuming image is a tensor of shape [H, W, C]
+        h, w, _ = image.shape
+        
+        for _ in range(random.randint(1, self.max_mask_num)):
+            image = self._apply_mask(image, h, w)
+
+        return image
+
+    def _apply_mask(self, image, h, w):
+        # Calculate max mask width and height based on mask_ratio
+        max_mask_width = int(w * self.mask_ratio)
+        max_mask_height = int(h * self.mask_ratio)
+        
+        # Randomly choose the dimension(s) to mask: 0 for cols, 1 for rows, 2 for both
+        dim_to_mask = random.randint(0, 2)
+        
+        # Initialize mask as ones
+        mask = torch.ones_like(image)
+        
+        # Select random start point for masking in both dimensions
+        x1 = random.randint(0, w - max_mask_width)
+        y1 = random.randint(0, h - max_mask_height)
+        
+        # Calculate end points ensuring they do not exceed max mask width/height
+        x2 = x1 + random.randint(1, max_mask_width)
+        y2 = y1 + random.randint(1, max_mask_height)
+        
+        # Adjust x2 and y2 to not go beyond image bounds
+        x2 = min(x2, w)
+        y2 = min(y2, h)
+        
+        if dim_to_mask == 0 or dim_to_mask == 2:
+            mask[:, :, x1:x2] = 0
+        
+        if dim_to_mask == 1 or dim_to_mask == 2:
+            mask[:, y1:y2, :] = 0
+        
+        image_new = image * mask
+        
+        return image_new
+
+
+applier = v2.RandomApply(
+    transforms=[
+        v2.RandomHorizontalFlip(p=.2),
+        v2.RandomVerticalFlip(p=.2),
+        MyXYMasking(mask_ratio=0.1, max_mask_num=2),
+        ], 
+        p=.5)
 
 
 def transform_spectrogram(spectrogram):
@@ -37,6 +97,7 @@ class CustomDataset(Dataset):
         config,
         all_specs: Dict[str, np.ndarray],
         all_eegs: Dict[str, np.ndarray],
+        augment: bool = False,
         mode: str = 'train',
     ): 
         self.df = df
@@ -46,6 +107,7 @@ class CustomDataset(Dataset):
         self.mode = mode
         self.spectrograms = all_specs
         self.eeg_spectrograms = all_eegs
+        self.augment = augment
         self.data_arrange = config.DATA_ARRANGE
         
     def __len__(self):
@@ -59,7 +121,14 @@ class CustomDataset(Dataset):
         Generate one batch of data.
         """
         X, y = self.__data_generation(index)
-        return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+
+        X = torch.tensor(X, dtype=torch.float32)
+        y = torch.tensor(y, dtype=torch.float32)
+
+        if self.mode == 'train' and self.augment:
+            X = self.__transform(X)
+        
+        return X, y
                         
     def __data_generation(self, index):
         """
@@ -94,6 +163,9 @@ class CustomDataset(Dataset):
 
         return X, y
 
+    def __transform(self, x):
+        x = applier(x)
+        return x
 
 class CustomModel(nn.Module):
 

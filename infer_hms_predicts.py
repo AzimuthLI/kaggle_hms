@@ -186,7 +186,7 @@ if __name__ == "__main__":
     # define the paths
     paths = KagglePaths if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths
 
-    model_weights = [x for x in glob("/kaggle/input/hms-efficientnet-b2-flat-models/tf_efficientnet_b2_fold_*_flat_dropout_005.pth")]
+    model_weights = [x for x in glob("/home/shiyi/kaggle_hms/outputs/model_b2_flat_dropout_005/tf_efficientnet_b2_fold_*_flat_dropout_005.pth")]
     print(f"{'-'*10}\nModel Weights")
     for mw in model_weights:
         print(mw)

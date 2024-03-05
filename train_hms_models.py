@@ -75,33 +75,67 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def get_non_overlap(df_csv, targets):
+def get_non_overlap(df_csv, targets, calc_method='simple'):
     # Reference Discussion:
     # https://www.kaggle.com/competitions/hms-harmful-brain-activity-classification/discussion/467021
 
     # train and validate using only 1 crop per eeg_id
-    # same results as Chris's notebook
+    # Simple method:
+    # - sum the votes for each label
+    # - divide by the total number of votes
+    # Weighted method:
+    # - calculate the confidence for each label
+    # - multiply the confidence by the votes for each label
+    # - divide by the sum of the confidence for each label
+    # - the confidence is calculated considering:
+    #   - the number of votes for the label
+    #   - the agreement between the experts
 
     tgt_list = targets.tolist()
+    brain_activity = ['seizure', 'lpd', 'gpd', 'lrda', 'grda', 'other']
+    n_classes = len(brain_activity)
+
+    def calc_confidence(row, n_max, n_classes):
+        norm_weight = row['total_experts'] / n_max
+        agreement = (row['vote_max'] - row['total_experts']/n_classes) / \
+                    (row['total_experts'] - row['total_experts']/n_classes)
+        return norm_weight * agreement
+
+    def calc_weighted_votes(grp):
+
+        n_experts_max = grp['total_experts'].max()
+        grp['confidence'] = grp.apply(calc_confidence, axis=1, args=(n_experts_max, n_classes))
+        grp['confidence_norm'] = grp['confidence'] / grp['confidence'].sum()
+
+        weighted_votes = grp[tgt_list].multiply(grp['confidence_norm'], axis='index').sum()
+
+        return weighted_votes
 
     agg_dict = {
         'spectrogram_id': 'first',
         'spectrogram_label_offset_seconds': ['min', 'max'],
         'patient_id': 'first',
+        'expert_consensus': 'first'
     }
-
-    for t in tgt_list:
-        agg_dict[t] = 'sum'
-
-    agg_dict['expert_consensus'] = 'first'
-
-    train = df_csv.groupby('eeg_id').agg(agg_dict)
+    
+    groupby = df_csv.groupby('eeg_id')
+    train = groupby.agg(agg_dict)
     train.columns = ['_'.join(col).strip() for col in train.columns.values]
-    train.columns = ['spectrogram_id', 'min', 'max', 'patient_id'] + tgt_list + ['target']
+    train.columns = ['spectrogram_id', 'min', 'max', 'patient_id', 'target']
+    
+    if calc_method == 'simple':
+        vote_sum = groupby[tgt_list].sum()
+        class_probs = vote_sum.div(vote_sum.sum(axis=1), axis=0).reset_index(drop=False)
+
+    elif calc_method == 'weighted':
+        df_csv['total_experts'] = df_csv[[f"{label}_vote" for label in brain_activity]].sum(axis=1)
+        df_csv['vote_max'] = df_csv[[f"{label}_vote" for label in brain_activity]].max(axis=1)
+        weighted_votes = df_csv.groupby('eeg_id').apply(calc_weighted_votes, include_groups=False) 
+        class_probs = weighted_votes.div(weighted_votes.sum(axis=1), axis=0).reset_index(drop=False)
+
     train = train.reset_index(drop=False)
-
-    train[tgt_list] = train[tgt_list].div(train[tgt_list].sum(axis=1), axis='index')
-
+    train = train.merge(class_probs, on='eeg_id', how='left')
+    
     return train
 
 
@@ -258,8 +292,8 @@ def train_model(df_train, targets, config, paths, logger):
         valid_folds = df_train[df_train['fold'] == fold].reset_index(drop=True)
         
         # ======== DATASETS ==========
-        train_dataset = CustomDataset(train_folds, targets, config, all_specs, all_eegs, mode="train")
-        valid_dataset = CustomDataset(valid_folds, targets, config, all_specs, all_eegs, mode="train")
+        train_dataset = CustomDataset(train_folds, targets, config, all_specs, all_eegs, augment=config.AUGMENT, mode="train")
+        valid_dataset = CustomDataset(valid_folds, targets, config, all_specs, all_eegs, augment=False, mode="train")
         
         # ======== DATALOADERS ==========
         loader_kwargs = {
@@ -327,6 +361,8 @@ if __name__ == "__main__":
     logger.info(f"Data Arrange: {ModelConfig.DATA_ARRANGE}")
     logger.info(f"Drop Rate: {ModelConfig.DROP_RATE}")
     logger.info(f"Drop Path Rate: {ModelConfig.DROP_PATH_RATE}")
+    logger.info(f"Augment: {ModelConfig.AUGMENT}")
+    logger.info(f"Non-Overlap Method: {ModelConfig.NON_OVERLAP_METHOD}")
     logger.info(f"Output Dir: {paths.OUTPUT_DIR}")
 
     # Load the data
@@ -334,7 +370,7 @@ if __name__ == "__main__":
     TARGETS = train_csv.columns[-6:]
 
     # Get the non-overlapping data
-    df_train = get_non_overlap(train_csv, TARGETS)
+    df_train = get_non_overlap(train_csv, TARGETS, calc_method=ModelConfig.NON_OVERLAP_METHOD)
 
     all_specs = np.load(paths.PRE_LOADED_SPECTOGRAMS, allow_pickle=True).item()
     all_eegs = np.load(paths.PRE_LOADED_EEGS, allow_pickle=True).item()
