@@ -64,8 +64,8 @@ class MyXYMasking(nn.Module):
 
 applier = v2.RandomApply(
     transforms=[
-        v2.RandomHorizontalFlip(p=.2),
-        v2.RandomVerticalFlip(p=.2),
+        v2.RandomHorizontalFlip(p=1),  
+        v2.RandomVerticalFlip(p=1), 
         MyXYMasking(mask_ratio=0.1, max_mask_num=2),
         ], 
         p=.5)
