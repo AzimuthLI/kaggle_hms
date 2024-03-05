@@ -1,3 +1,5 @@
+# %% [code]
+# %% [code]
 # Regular imports
 import os, gc
 import numpy as np
@@ -184,7 +186,7 @@ if __name__ == "__main__":
     # define the paths
     paths = KagglePaths if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths
 
-    model_weights = [x for x in glob("/kaggle/input/hms-efficientnet-b2-flat-models/*.pth")]
+    model_weights = [x for x in glob("/kaggle/input/hms-efficientnet-b2-flat-models/tf_efficientnet_b2_fold_*_flat_dropout_005.pth")]
     print(f"{'-'*10}\nModel Weights")
     for mw in model_weights:
         print(mw)
@@ -257,11 +259,11 @@ if __name__ == "__main__":
     sub[TARGET_COLS] = predictions
 
     # Sanity check
-    sum_to_one = sub[TARGET_COLS].sum(axis=1).values[0]
+    sum_to_one = sub[TARGET_COLS].sum(axis=1)
 
     print(sum_to_one)
 
-    if sum_to_one == 1.0:
+    if (sum_to_one == 1.0).all():
         print("All predictions sum to 1.0. Passed the sanity check.")
         print(f'Submissionn shape: {sub.shape}')
         print(sub.head())
