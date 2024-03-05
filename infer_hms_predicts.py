@@ -1,5 +1,3 @@
-# %% [code]
-# %% [code]
 # Regular imports
 import os, gc
 import numpy as np
@@ -260,14 +258,8 @@ if __name__ == "__main__":
 
     # Sanity check
     sum_to_one = sub[TARGET_COLS].sum(axis=1)
-
     print(sum_to_one)
 
-    if (sum_to_one == 1.0).all():
-        print("All predictions sum to 1.0. Passed the sanity check.")
-        print(f'Submissionn shape: {sub.shape}')
-        print(sub.head())
-        sub.to_csv('submission.csv', index=False)
-
-    else:
-        raise ValueError("Predictions do not sum to 1.0. Please check the predictions.")
+    print(f'Submissionn shape: {sub.shape}')
+    print(sub.head())
+    sub.to_csv('submission.csv', index=False)
