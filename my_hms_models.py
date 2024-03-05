@@ -103,8 +103,8 @@ class CustomModel(nn.Module):
         self.model = timm.create_model(
             config.MODEL,
             pretrained=pretrained,
-            drop_rate = 0.1,
-            drop_path_rate = 0.2,
+            drop_rate = config.DROP_RATE,
+            drop_path_rate = config.DROP_PATH_RATE,
         )
         
         if config.FREEZE:

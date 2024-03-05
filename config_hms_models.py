@@ -5,13 +5,15 @@ class ModelConfig:
     BATCH_SIZE = 20
     EPOCHS = 6
     FOLDS = 5
+    DROP_RATE = 0.15 # default: 0.1
+    DROP_PATH_RATE = 0.25 # default: 0.2
     USE_KAGGLE_SPECTROGRAMS = True
     USE_EEG_SPECTROGRAMS = True
     DATA_ARRANGE = 0 # 0: [512, 512, 1], 1: [256, 256, 4]
     FREEZE = False
     MAX_GRAD_NORM = 1e7
     MODEL = "tf_efficientnet_b2" #"tf_efficientnet_b0"
-    MODEL_POSTFIX = "flat"  
+    MODEL_POSTFIX = "flat_dropout_005" # "flat"
     NUM_FROZEN_LAYERS = 39
     NUM_WORKERS = 0 # multiprocessing.cpu_count()
     PRINT_FREQ = 50

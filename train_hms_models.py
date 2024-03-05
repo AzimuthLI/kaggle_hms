@@ -305,7 +305,7 @@ def train_model(df_train, targets, config, paths, logger):
 
 if __name__ == "__main__":
 
-    Train_Flag = False
+    Train_Flag = True
 
     total_start = time.time()
 
@@ -325,6 +325,8 @@ if __name__ == "__main__":
     logger.info(f"Model: {ModelConfig.MODEL}")
     logger.info(f"Model Postfix: {ModelConfig.MODEL_POSTFIX}")
     logger.info(f"Data Arrange: {ModelConfig.DATA_ARRANGE}")
+    logger.info(f"Drop Rate: {ModelConfig.DROP_RATE}")
+    logger.info(f"Drop Path Rate: {ModelConfig.DROP_PATH_RATE}")
     logger.info(f"Output Dir: {paths.OUTPUT_DIR}")
 
     # Load the data
