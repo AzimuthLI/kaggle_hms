@@ -74,8 +74,7 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
-
-def get_non_overlap(df_csv, targets, calc_method='simple'):
+def get_non_overlap(df_csv, targets, group_key=['eeg_id'], calc_method='simple'):
     # Reference Discussion:
     # https://www.kaggle.com/competitions/hms-harmful-brain-activity-classification/discussion/467021
 
@@ -118,11 +117,11 @@ def get_non_overlap(df_csv, targets, calc_method='simple'):
         'expert_consensus': 'first'
     }
     
-    groupby = df_csv.groupby('eeg_id')
+    groupby = df_csv.groupby(group_key)
     train = groupby.agg(agg_dict)
     train.columns = ['_'.join(col).strip() for col in train.columns.values]
     train.columns = ['spectrogram_id', 'min', 'max', 'patient_id', 'target']
-    
+
     if calc_method == 'simple':
         vote_sum = groupby[tgt_list].sum()
         class_probs = vote_sum.div(vote_sum.sum(axis=1), axis=0).reset_index(drop=False)
@@ -130,11 +129,12 @@ def get_non_overlap(df_csv, targets, calc_method='simple'):
     elif calc_method == 'weighted':
         df_csv['total_experts'] = df_csv[[f"{label}_vote" for label in brain_activity]].sum(axis=1)
         df_csv['vote_max'] = df_csv[[f"{label}_vote" for label in brain_activity]].max(axis=1)
-        weighted_votes = df_csv.groupby('eeg_id').apply(calc_weighted_votes, include_groups=False) 
+        weighted_votes = df_csv.groupby(group_key).apply(calc_weighted_votes, include_groups=False) 
         class_probs = weighted_votes.div(weighted_votes.sum(axis=1), axis=0).reset_index(drop=False)
 
+    train = train.dropna()
     train = train.reset_index(drop=False)
-    train = train.merge(class_probs, on='eeg_id', how='left')
+    train = train.merge(class_probs, on=group_key, how='left')
     
     return train
 
@@ -371,7 +371,11 @@ if __name__ == "__main__":
     TARGETS = train_csv.columns[-6:]
 
     # Get the non-overlapping data
-    df_train = get_non_overlap(train_csv, TARGETS, calc_method=ModelConfig.NON_OVERLAP_METHOD)
+    df_train = get_non_overlap(train_csv, TARGETS, ModelConfig.GROUP_KEYS, calc_method=ModelConfig.NON_OVERLAP_METHOD)
+
+    print(f"{'-'*100}\nTrain Data\n{'-'*100}")
+    print(df_train.head(10))
+    print(f"{'-'*100}\nTrain Data Shape: {df_train.shape}\n{'-'*100}")
 
     all_specs = np.load(paths.PRE_LOADED_SPECTOGRAMS, allow_pickle=True).item()
     all_eegs = np.load(paths.PRE_LOADED_EEGS, allow_pickle=True).item()
