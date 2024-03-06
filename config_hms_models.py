@@ -14,7 +14,7 @@ class ModelConfig:
     DATA_ARRANGE = 0 # 0: [512, 512, 1], 1: [256, 256, 4]
     FREEZE = False
     MAX_GRAD_NORM = 1e7
-    MODEL = "tf_efficientnet_b0" #"tf_efficientnet_b0"
+    MODEL = "tf_efficientnet_b2" #"tf_efficientnet_b0"
     MODEL_POSTFIX = "weighted_votes" # "flat"
     NUM_FROZEN_LAYERS = 39
     NUM_WORKERS = 0 # multiprocessing.cpu_count()
