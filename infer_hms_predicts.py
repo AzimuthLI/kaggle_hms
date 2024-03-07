@@ -183,7 +183,7 @@ if __name__ == "__main__":
     # define the paths
     paths = KagglePaths if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths
     
-    model_dir = "/home/shiyi/kaggle_hms/outputs/model_b2_hflip"
+    model_dir = "./outputs/model_b2_hflip"
 
     model_weights = [x for x in glob(f"{model_dir}/*.pth")]
     print(f"{'-'*10}\nModel Weights")

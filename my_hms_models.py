@@ -27,7 +27,7 @@ class ModelConfig:
     FREEZE = False
     MAX_GRAD_NORM = 1e7
     MODEL = "tf_efficientnet_b2" #"tf_efficientnet_b0"
-    MODEL_POSTFIX = "h_flip" # "flat"
+    MODEL_POSTFIX = "cutmix" # "flat"
     NUM_FROZEN_LAYERS = 39
     NUM_WORKERS = 0 # multiprocessing.cpu_count()
     PRINT_FREQ = 50
@@ -171,7 +171,7 @@ augment_applier = v2.RandomApply(
     transforms=[
         v2.RandomHorizontalFlip(p=1), 
         # v2.RandomVerticalFlip(p=1),
-        # MyXYMasking(mask_ratio=0.1, max_mask_num=1, p=1),
+        MyXYMasking(mask_ratio=0.1, max_mask_num=1, p=1),
         ], 
         p=.5)
 
@@ -258,7 +258,7 @@ class CustomDataset(Dataset):
 
     def __transform(self, x, y):
 
-        if True: #random.choice([True, False]):
+        if random.choice([True, False]):
             x = augment_applier(x)
         else:
             
