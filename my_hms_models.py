@@ -1,3 +1,4 @@
+# %% [code]
 
 import numpy as np
 import pandas as pd
@@ -10,25 +11,90 @@ from torchvision.transforms import v2
 import timm
 import random
 
+class ModelConfig:
+    NON_OVERLAP_METHOD = 'weighted' # 'weighted', 'simple'
+    GROUP_KEYS = 'eeg_id'
+    AMP = True
+    BATCH_SIZE = 16
+    EPOCHS = 6
+    FOLDS = 5
+    GRADIENT_ACCUMULATION_STEPS = 2
+    DROP_RATE = 0.15 # default: 0.1
+    DROP_PATH_RATE = 0.25 # default: 0.2
+    USE_KAGGLE_SPECTROGRAMS = True
+    USE_EEG_SPECTROGRAMS = True
+    AUGMENT = True
+    DATA_ARRANGE = 0 # 0: [512, 512, 1], 1: [256, 256, 4]
+    FREEZE = False
+    MAX_GRAD_NORM = 1e7
+    MODEL = "tf_efficientnet_b2" #"tf_efficientnet_b0"
+    MODEL_POSTFIX = "h_flip" # "flat"
+    NUM_FROZEN_LAYERS = 39
+    NUM_WORKERS = 0 # multiprocessing.cpu_count()
+    PRINT_FREQ = 50
+    SEED = 20
+    TRAIN_FULL_DATA = False
+    VISUALIZE = True
+    WEIGHT_DECAY = 0.01
+    
+class KagglePaths:
+    OUTPUT_DIR = "/kaggle/working/"
+    PRE_LOADED_EEGS = '/kaggle/input/brain-eeg-spectrograms/eeg_specs.npy'
+    PRE_LOADED_SPECTOGRAMS = '/kaggle/input/brain-spectrograms/specs.npy'
+    TRAIN_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/train.csv"
+    TRAIN_EEGS = "/kaggle/input/brain-eeg-spectrograms/EEG_Spectrograms/"
+    TRAIN_SPECTOGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/train_spectrograms/"
+    TEST_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/test.csv"
+    TEST_SPECTROGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/test_spectrograms/"
+    TEST_EEGS = "/kaggle/input/hms-harmful-brain-activity-classification/test_eegs/"
+
+class LocalPaths:
+    OUTPUT_DIR = "./outputs/"
+    PRE_LOADED_EEGS = './inputs/brain-eeg-spectrograms/eeg_specs.npy'
+    PRE_LOADED_SPECTOGRAMS = './inputs/brain-spectrograms/specs.npy'
+    TRAIN_CSV = "./inputs/hms-harmful-brain-activity-classification/train.csv"
+    TRAIN_EEGS = " ./inputs/hms-harmful-brain-activity-classification/train_eegs"
+    TRAIN_SPECTOGRAMS = "./inputs/hms-harmful-brain-activity-classification/train_spectrograms"
+    TEST_CSV = "./inputs/hms-harmful-brain-activity-classification/test.csv"
+    TEST_SPECTROGRAMS = "./inputs/hms-harmful-brain-activity-classification/test_spectrograms"
+    TEST_EEGS = "./inputs/hms-harmful-brain-activity-classification/test_eegs"
+
+
+def transform_spectrogram(spectrogram):
+
+    # Log transform spectogram
+    spectrogram = np.clip(spectrogram, np.exp(-4), np.exp(8))
+    spectrogram = np.log(spectrogram)
+
+    # Standarize per image
+    ep = 1e-6
+    mu = np.nanmean(spectrogram.flatten())
+    std = np.nanstd(spectrogram.flatten())
+    spectrogram = (spectrogram-mu) / (std+ep)
+    spectrogram = np.nan_to_num(spectrogram, nan=0.0)
+        
+    return spectrogram
+
 
 class MyXYMasking(nn.Module):
 
-    def __init__(self, mask_ratio=0.1, max_mask_num=2):
+    def __init__(self, mask_ratio=0.1, max_mask_num=2, p=0.5):
         super(MyXYMasking, self).__init__()
         self.mask_ratio = mask_ratio
         self.max_mask_num = max_mask_num
+        self.p = p
     
-    def forward(self, image):
-    
-        # Assuming image is a tensor of shape [H, W, C]
-        h, w, _ = image.shape
-        
-        for _ in range(random.randint(1, self.max_mask_num)):
-            image = self._apply_mask(image, h, w)
+    def forward(self, X):
+        if random.random() > self.p:
+            return X
+        else:
+            for _ in range(random.randint(1, self.max_mask_num)):
+                X = self._apply_mask(X)
+        return X
 
-        return image
+    def _apply_mask(self, image):
 
-    def _apply_mask(self, image, h, w):
+        c, h, w = image.shape
         # Calculate max mask width and height based on mask_ratio
         max_mask_width = int(w * self.mask_ratio)
         max_mask_height = int(h * self.mask_ratio)
@@ -62,30 +128,56 @@ class MyXYMasking(nn.Module):
         return image_new
 
 
-applier = v2.RandomApply(
+class MyCutMix(nn.Module):
+
+    def __init__(self, cut_ratio=0.1, bound_pad=20, p=0.5):
+        super(MyCutMix, self).__init__()
+        self.cut_ratio = cut_ratio
+        self.bound_pad = bound_pad
+        self.p = p
+
+    def forward(self, X, y, cut_image, cut_target):
+
+        if random.random() > self.p:
+            return X, y
+        else:
+            # Randomly select a region to cut
+            # only apply cut along the time axis
+            # avoid cutting the center of the spectrogram
+            c, h, w = X.shape
+            center = int(w/2)
+            cut_width = random.randint(1, int(w * self.cut_ratio))
+
+            # Either cut the left or right side
+            if random.choice([True, False]):
+                x0 = random.randint(self.bound_pad, center - cut_width - self.bound_pad)
+                x1 = x0 + cut_width
+            else:
+                x0 = random.randint(center + self.bound_pad, w - cut_width - self.bound_pad)
+                x1 = x0 + cut_width
+
+            # Apply the cut
+            X[:, :, x0:x1] = cut_image[:, :, x0:x1]
+
+            # Adjust target
+            cut_area = (x1 - x0) / w
+            y = (1-cut_area) * y + cut_area * cut_target
+
+            return X, y
+
+
+
+# Define the augmentations
+augment_applier = v2.RandomApply(
     transforms=[
-        v2.RandomHorizontalFlip(p=1),  
-        v2.RandomVerticalFlip(p=1), 
-        MyXYMasking(mask_ratio=0.1, max_mask_num=2),
+        v2.RandomHorizontalFlip(p=1), 
+        # v2.RandomVerticalFlip(p=1),
+        # MyXYMasking(mask_ratio=0.1, max_mask_num=1, p=1),
         ], 
         p=.5)
 
-
-def transform_spectrogram(spectrogram):
-
-    # Log transform spectogram
-    spectrogram = np.clip(spectrogram, np.exp(-4), np.exp(8))
-    spectrogram = np.log(spectrogram)
-
-    # Standarize per image
-    ep = 1e-6
-    mu = np.nanmean(spectrogram.flatten())
-    std = np.nanstd(spectrogram.flatten())
-    spectrogram = (spectrogram-mu) / (std+ep)
-    spectrogram = np.nan_to_num(spectrogram, nan=0.0)
-        
-    return spectrogram
-
+# maximum cut: 20% of the width
+cutmix_applier = MyCutMix(cut_ratio=0.2, bound_pad=20, p=.5)
 
 
 class CustomDataset(Dataset):
@@ -122,11 +214,8 @@ class CustomDataset(Dataset):
         """
         X, y = self.__data_generation(index)
 
-        X = torch.tensor(X, dtype=torch.float32)
-        y = torch.tensor(y, dtype=torch.float32)
-
         if self.mode == 'train' and self.augment:
-            X = self.__transform(X)
+            X, y = self.__transform(X, y)
         
         return X, y
                         
@@ -161,11 +250,32 @@ class CustomDataset(Dataset):
         elif self.mode == 'test':
             y = np.zeros(len(self.label_cols), dtype=np.float32)
 
+        X = torch.tensor(X, dtype=torch.float32)
+        X = X.permute(2, 0, 1)
+
+        y = torch.tensor(y, dtype=torch.float32)
+        
         return X, y
 
-    def __transform(self, x):
-        x = applier(x)
-        return x
+    def __transform(self, x, y):
+
+        if True: #random.choice([True, False]):
+            x = augment_applier(x)
+        else:
+            
+            sample_class = self.label_cols[torch.argmax(y).item()]
+            same_class_samples = self.df[self.df[self.label_cols].idxmax(axis=1) == sample_class]
+
+            # Skip if less than 2 samples with coconfidence score 1.0
+            if len(same_class_samples) > 2:
+
+                selected_idx = random.choice(same_class_samples.index)
+                cut_img, cut_target = self.__data_generation(selected_idx)
+
+                x, y = cutmix_applier(x, y, cut_img, cut_target)
+
+        return x, y
+
 
 class CustomModel(nn.Module):
 
@@ -193,14 +303,21 @@ class CustomModel(nn.Module):
         )
     
     def __reshape_input(self, x):
-        # input size: [batch * 128 * 256 * 8]
-        # output size: [batch * 3 * 512 * 512]
-        spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
-        eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
-        x = torch.cat([spectograms, eegs], dim=2)
-        x = torch.cat([x, x, x], dim=3)
-        x = x.permute(0, 3, 1, 2)
+        # # input size: [batch * 128 * 256 * 8]
+        # spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
+        # eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
+        # x = torch.cat([spectograms, eegs], dim=2)
+        # x = torch.cat([x, x, x], dim=3)
+        # x = x.permute(0, 3, 1, 2)
+
+        # input size: [batch * 8 * 128 * 256]
+        kgg_specs = torch.cat([x[:, i:i+1, :, :] for i in range(0, 4)], dim=2)
+        eeg_specs = torch.cat([x[:, i:i+1, :, :] for i in range(4, 8)], dim=2)
+
+        x = torch.cat([kgg_specs, eeg_specs], dim=3)
+        x = torch.cat([x, x, x], dim=1)
         
+        # output size: [batch * 3 * 512 * 512]
         return x
     
     def forward(self, x):
