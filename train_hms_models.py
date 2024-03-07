@@ -1,4 +1,4 @@
-# %% [code]
+
 # Standard library imports
 import os
 import multiprocessing
@@ -26,15 +26,17 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import OneCycleLR
 
 # Local imports
-from config_hms_models import ModelConfig, KagglePaths, LocalPaths
-from my_hms_models import CustomModel, CustomDataset, transform_spectrogram
+from my_hms_models import *
+
 
 # Define the device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
+
 # define the paths
 paths = KagglePaths if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths
+
 
 def seed_everything(seed: int):
     random.seed(seed)
@@ -157,23 +159,27 @@ def train_epoch(train_loader, model, criterion, optimizer, epoch, scheduler, dev
             with autocast(enabled=config.AMP):
                 outputs = model(X)
                 loss = criterion(F.log_softmax(outputs, dim=1), y)
+            
+            if config.GRADIENT_ACCUMULATION_STEPS > 1:
+                loss = loss / config.GRADIENT_ACCUMULATION_STEPS
 
             losses.update(loss.item(), batch_size)
             scaler.scale(loss).backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.MAX_GRAD_NORM)
             
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            global_step += 1
-            scheduler.step()
+            if (step + 1) % config.GRADIENT_ACCUMULATION_STEPS == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                global_step += 1
+                scheduler.step()
 
             end = time.time()
 
             if step % config.PRINT_FREQ == 0 or step == (len(train_loader)-1):
                 lr = scheduler.get_last_lr()[0]
                 info = f"Epoch: [{epoch+1}][{step}/{len(train_loader)}]"
-                info += f"Elapsed {(end-start):.2f}s Loss: {losses.avg:.4f} Grad: {grad_norm:.4f} LR: {lr:.8f}"
+                info += f"Elapsed {(end-start):.2f}s Loss: {losses.avg:.4f} Grad: {grad_norm:.4f} LR: {lr:.4e}"
                 print(info)
 
     return losses.avg
@@ -197,6 +203,9 @@ def validate_epoch(valid_loader, model, criterion, device, config):
             with torch.no_grad():
                 y_preds = model(X)
                 loss = criterion(F.log_softmax(y_preds, dim=1), y)
+            
+            if config.GRADIENT_ACCUMULATION_STEPS > 1:
+                loss = loss / config.GRADIENT_ACCUMULATION_STEPS
 
             losses.update(loss.item(), batch_size)
             preds.append(y_preds.to('cpu').numpy())
@@ -282,6 +291,13 @@ def train_model(df_train, targets, config, paths, logger):
     print(df_train.head(10))
 
     oof_df = pd.DataFrame()
+
+    fig, ax = plt.subplots(1, 1, figsize=(9, 6))
+    ax.set_xlabel("Epochs")
+    ax.set_ylabel("Loss")
+    ax.grid(True)
+    line_colors = plt.get_cmap('tab10').colors
+
     for fold in range(config.FOLDS):
 
         logger.info(f"{'='*100}\nFold: {fold} training\n{'='*100}")
@@ -307,21 +323,18 @@ def train_model(df_train, targets, config, paths, logger):
 
         best_model, prediction_dict, loss_records = train_fold(train_loader, valid_loader, config, logger)
 
-        name_stem = f"{config.MODEL}_fold_{fold}_{config.MODEL_POSTFIX}"
+        name_stem = f"{config.MODEL}_{config.MODEL_POSTFIX}"
         
-        fig, ax = plt.subplots(1, 1, figsize=(5, 4))
-        ax.plot(loss_records['train'], "o-", label="Train Loss")
-        ax.plot(loss_records['valid'], "o-", label="Valid Loss")
-        ax.set_xlabel("Epochs")
-        ax.set_ylabel("Loss")
-        ax.set_title(f"Fold {fold} Training Loss")
-        ax.legend()
-        ax.grid(True)
+        # Plot the loss
+        ax.plot(loss_records['train'], 'o-', c=line_colors[fold], label=f"Train {fold}")
+        ax.plot(loss_records['valid'], 'o:', c=line_colors[fold], label=f"Valid {fold}")
+        ax.set_title(f"{name_stem}")
+        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
         fig.tight_layout()
         fig.savefig(f"{paths.OUTPUT_DIR}/{name_stem}_loss.png")
 
         # Save the model
-        save_name = f"{paths.OUTPUT_DIR}/{name_stem}.pth"
+        save_name = f"{paths.OUTPUT_DIR}/{name_stem}_fold_{fold}.pth"
         torch.save(best_model.state_dict(), save_name)
 
         valid_folds[target_preds] = prediction_dict['predictions']
@@ -340,7 +353,7 @@ def train_model(df_train, targets, config, paths, logger):
 
 if __name__ == "__main__":
 
-    Train_Flag = True
+    Train_Flag = False
 
     total_start = time.time()
 
@@ -383,7 +396,8 @@ if __name__ == "__main__":
     if ModelConfig.VISUALIZE:
 
         # Create the dataset
-        dataset = CustomDataset(df_train, TARGETS, ModelConfig, all_specs, all_eegs, mode='train')
+        dataset = CustomDataset(
+            df_train, TARGETS, ModelConfig, all_specs, all_eegs, ModelConfig.AUGMENT, mode='train')
 
         # Create the dataloader
         dataloader = DataLoader(
@@ -401,9 +415,10 @@ if __name__ == "__main__":
 
         fig, axes = plt.subplots(2, 4, figsize=(12, 6))
         for i, ax in enumerate(axes.flatten()):
-            im = ax.imshow(X[:, :, i], cmap="viridis")
+            im = ax.imshow(X[i, :, :], cmap="viridis")
             plt.colorbar(im, ax=ax, orientation='horizontal')
-        
+            
+        fig.suptitle(f"Target: {y}")
         fig.tight_layout()
         fig.savefig(f"{paths.OUTPUT_DIR}/sample_input.png")
         
