@@ -1,5 +1,3 @@
-# %% [code]
-# %% [code]
 # Regular imports
 import os, gc
 import numpy as np
@@ -15,8 +13,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 # Local imports
-from config_hms_models import ModelConfig, KagglePaths, LocalPaths
-from my_hms_models import CustomModel, CustomDataset, transform_spectrogram
+from my_hms_models import *
 
 # Constants
 USE_WAVELET = None 
@@ -186,9 +183,9 @@ if __name__ == "__main__":
     # define the paths
     paths = KagglePaths if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths
     
-    model_dir = "/kaggle/input/hms-efficientnet-b2-flat-models"
+    model_dir = "/home/shiyi/kaggle_hms/outputs/model_b2_hflip"
 
-    model_weights = [x for x in glob(f"{model_dir}/tf_efficientnet_b2_fold_*_weighted_op.pth")]
+    model_weights = [x for x in glob(f"{model_dir}/*.pth")]
     print(f"{'-'*10}\nModel Weights")
     for mw in model_weights:
         print(mw)
@@ -234,7 +231,8 @@ if __name__ == "__main__":
     predictions = []
     for model_weight in model_weights:
 
-        test_dataset = CustomDataset(test_df, TARGET_COLS, ModelConfig, all_spectrograms, all_eegs, augment=False, mode="test" )
+        test_dataset = CustomDataset(
+            test_df, TARGET_COLS, ModelConfig, all_spectrograms, all_eegs, augment=False, mode="test" )
         test_loader = DataLoader(
             test_dataset,
             batch_size=ModelConfig.BATCH_SIZE,
