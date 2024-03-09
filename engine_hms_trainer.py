@@ -123,7 +123,7 @@ def load_kaggle_data(paths, use_non_overlap=True, split_entropy=5.5):
     else:
         train = train_csv
     
-    all_specs = np.load(paths.PRE_LOADED_SPECTOGRAMS, allow_pickle=True).item()
+    all_specs = np.load(paths.PRE_LOADED_SPECTROGRAMS, allow_pickle=True).item()
     all_eegs = np.load(paths.PRE_LOADED_EEGS, allow_pickle=True).item()
     
     if split_entropy:
@@ -320,6 +320,8 @@ class HMSPredictor:
         self.logger.info(f"Drop Rate: {self.model_config.DROP_RATE}")
         self.logger.info(f"Drop Path Rate: {self.model_config.DROP_PATH_RATE}")
         self.logger.info(f"Augment: {self.model_config.AUGMENT}")
+        if self.model_config.AUGMENT:
+            self.logger.info(f"Augmentations: {self.model_config.AUGMENTATIONS}")
         self.logger.info(f"Enropy Split: {self.job_config.ENTROPY_SPLIT}")
         self.logger.info(f"Device: {DEVICE}")
         self.logger.info(f"Output Dir: {self.job_config.OUTPUT_DIR}")

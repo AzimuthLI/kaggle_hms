@@ -26,10 +26,10 @@ class KagglePaths:
 class LocalPaths:
     OUTPUT_DIR = "./outputs/"
     PRE_LOADED_EEGS = './inputs/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTOGRAMS = './inputs/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTROGRAMS = './inputs/brain-spectrograms/specs.npy'
     TRAIN_CSV = "./inputs/hms-harmful-brain-activity-classification/train.csv"
-    TRAIN_EEGS = " ./inputs/hms-harmful-brain-activity-classification/train_eegs"
-    TRAIN_SPECTOGRAMS = "./inputs/hms-harmful-brain-activity-classification/train_spectrograms"
+    TRAIN_EEGS = "./inputs/hms-harmful-brain-activity-classification/train_eegs"
+    TRAIN_SPECTROGRAMS = "./inputs/hms-harmful-brain-activity-classification/train_spectrograms"
     TEST_CSV = "./inputs/hms-harmful-brain-activity-classification/test.csv"
     TEST_SPECTROGRAMS = "./inputs/hms-harmful-brain-activity-classification/test_spectrograms"
     TEST_EEGS = "./inputs/hms-harmful-brain-activity-classification/test_eegs"
@@ -60,6 +60,7 @@ class ModelConfig:
     USE_EEG_SPECTROGRAMS = True
     AMP = True
     AUGMENT = False
+    AUGMENTATIONS = ['h_flip', 'v_flip', 'xy_masking', 'cutmix']
     PRINT_FREQ = 50
     FREEZE = False
     NUM_FROZEN_LAYERS = 0
@@ -158,20 +159,6 @@ class MyCutMix(nn.Module):
             return X, y
 
 
-
-# Define the augmentations
-augment_applier = v2.RandomApply(
-    transforms=[
-        v2.RandomHorizontalFlip(p=1), 
-        # v2.RandomVerticalFlip(p=1),
-        MyXYMasking(mask_ratio=0.1, max_mask_num=1, p=1),
-        ], 
-        p=.5)
-
-# maximum cut: 20% of the width
-cutmix_applier = MyCutMix(cut_ratio=0.2, bound_pad=20, p=.5)
-
-
 def transform_spectrogram(spectrogram):
 
     # Log transform spectogram
@@ -206,6 +193,9 @@ class CustomDataset(Dataset):
         self.mode = mode
         self.spectrograms = all_specs
         self.eeg_spectrograms = all_eegs
+
+        if self.config.AUGMENT:
+            self.augment_applier, self.cutmix_applier = self.__get_augment_applier()
         
     def __len__(self):
         return len(self.df)
@@ -218,7 +208,7 @@ class CustomDataset(Dataset):
             X, y = self.__transform(X, y)
         
         return X, y
-                        
+    
     def __data_generation(self, index): # --> [(C=8) x (H=128) x (W=256)]
         
         row = self.df.iloc[index]
@@ -255,19 +245,43 @@ class CustomDataset(Dataset):
         y = torch.tensor(y, dtype=torch.float32)
         
         return X, y
+    
+    def __get_augment_applier(self):
+
+        aug_list = []
+        
+        if 'h_flip' in self.config.AUGMENTATIONS:
+            aug_list.append(v2.RandomHorizontalFlip(p=1))
+        if 'v_flip' in self.config.AUGMENTATIONS:
+            aug_list.append(v2.RandomVerticalFlip(p=1))
+        if 'xy_masking' in self.config.AUGMENTATIONS:
+            aug_list.append(MyXYMasking(mask_ratio=0.1, max_mask_num=1, p=1))
+
+        if len(aug_list) > 0:
+            augment_applier = v2.RandomApply(transforms=aug_list, p=.5)
+        else:
+            augment_applier = None
+
+        cutmix_applier = None
+        if 'cutmix' in self.config.AUGMENTATIONS:
+            cutmix_applier = MyCutMix(cut_ratio=0.2, bound_pad=20, p=1)
+        
+        return augment_applier, cutmix_applier
 
     def __transform(self, x, y):
 
         if random.choice([True, False]):
-            x = augment_applier(x)
+            if self.augment_applier is not None:
+                x = self.augment_applier(x)
         else:
-            sample_class = self.label_cols[torch.argmax(y).item()]
-            same_class_samples = self.df[self.df[self.label_cols].idxmax(axis=1) == sample_class]
-            # Skip if less than 2 samples with the same class label
-            if len(same_class_samples) > 2:
-                selected_idx = random.choice(same_class_samples.index)
-                cut_img, cut_target = self.__data_generation(selected_idx)
-                x, y = cutmix_applier(x, y, cut_img, cut_target)
+            if self.cutmix_applier is not None:
+                sample_class = self.label_cols[torch.argmax(y).item()]
+                same_class_samples = self.df[self.df[self.label_cols].idxmax(axis=1) == sample_class]
+                # Skip if less than 2 samples with the same class label
+                if len(same_class_samples) > 2:
+                    selected_idx = random.choice(same_class_samples.index)
+                    cut_img, cut_target = self.__data_generation(selected_idx)
+                    x, y = self.cutmix_applier(x, y, cut_img, cut_target)
 
         return x, y
 

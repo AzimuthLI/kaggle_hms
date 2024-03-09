@@ -1,5 +1,6 @@
 # Regular imports
 import os, gc
+import shutil
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -188,7 +189,7 @@ if __name__ == "__main__":
     ModelConfig.MODEL_BACKBONE = 'tf_efficientnet_b0'
     ModelConfig.MODEL_NAME = "ENet_b0_two_stages"
     
-    model_dir = "./outputs"
+    model_dir = "./outputs/model_b0_two_stage_only_kaggle"
 
     model_weights = [x for x in glob(f"{model_dir}/{ModelConfig.MODEL_NAME}_fold_*_stage_2.pth")]
     print(f"{'-'*10}\nModel Weights")
@@ -196,7 +197,27 @@ if __name__ == "__main__":
         print(mw)
     print(f"{'-'*10}")
 
+    # make syntetic test_csv
+    train_df = pd.read_csv(paths.TRAIN_CSV)
+    print(train_df.head())
+
     test_df = pd.read_csv(paths.TEST_CSV)
+    for idx in range(10):
+        new_row = train_df.iloc[idx]
+        test_df.loc[idx+1] = new_row[['spectrogram_id', 'eeg_id', 'patient_id']]
+        spec_parquet = f"{paths.TEST_SPECTROGRAMS}/{new_row['spectrogram_id']}.parquet"
+        eeg_parquet = f"{paths.TEST_EEGS}/{new_row['eeg_id']}.parquet"
+
+        if not os.path.exists(spec_parquet):
+            shutil.copy(
+                f"{paths.TRAIN_SPECTROGRAMS}/{new_row['spectrogram_id']}.parquet", 
+                spec_parquet)
+            
+        if not os.path.exists(eeg_parquet):
+            shutil.copy(
+                f"{paths.TRAIN_EEGS}/{new_row['eeg_id']}.parquet", 
+                eeg_parquet)
+    
     print('Test shape',test_df.shape)
     print(test_df.head())
     
@@ -257,16 +278,22 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
         gc.collect()
         
-    predictions = np.array(predictions)
-    predictions = np.mean(predictions, axis=0)
+    preds = np.array(predictions)
+    preds = np.mean(predictions, axis=0)
+
+    preds_min = preds.min(axis=1)[:, np.newaxis]
+    preds_max = preds.max(axis=1)[:, np.newaxis]
+    preds_norm = (preds - preds_min) / (preds_max - preds_min)
+    
+    preds_norm = preds_norm / preds_norm.sum(axis=1)[:, np.newaxis]
 
     sub = pd.DataFrame({'eeg_id': test_df.eeg_id.values})
-    sub[TARGET_COLS] = predictions
+    sub[TARGET_COLS] = preds_norm #predictions
+
+    print(f'Submissionn shape: {sub.shape}')
+    print(sub.head(10))
 
     # Sanity check
     sum_to_one = sub[TARGET_COLS].sum(axis=1)
-    print(sum_to_one)
-
-    print(f'Submissionn shape: {sub.shape}')
-    print(sub.head())
-    sub.to_csv('submission.csv', index=False)
+    print("Sanity check :")
+    print(f"All sum to one? {np.allclose(sum_to_one.values, 1)}")
