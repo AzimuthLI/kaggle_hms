@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 # Local imports
-from my_hms_models import *
+from engine_hms_model import CustomModel, CustomDataset, JobConfig, ModelConfig
 
 # Constants
 USE_WAVELET = None 
@@ -181,11 +181,16 @@ def inference_function(test_loader, model):
 if __name__ == "__main__":
 
     # define the paths
-    paths = KagglePaths if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths
-    
-    model_dir = "./outputs/model_b2_hflip"
+    paths = JobConfig.PATHS
 
-    model_weights = [x for x in glob(f"{model_dir}/*.pth")]
+    ModelConfig.EPOCHS = 6
+    ModelConfig.USE_EEG_SPECTROGRAMS = False
+    ModelConfig.MODEL_BACKBONE = 'tf_efficientnet_b0'
+    ModelConfig.MODEL_NAME = "ENet_b0_two_stages"
+    
+    model_dir = "./outputs"
+
+    model_weights = [x for x in glob(f"{model_dir}/{ModelConfig.MODEL_NAME}_fold_*_stage_2.pth")]
     print(f"{'-'*10}\nModel Weights")
     for mw in model_weights:
         print(mw)
@@ -207,7 +212,7 @@ if __name__ == "__main__":
         all_spectrograms[name] = aux.iloc[:,1:].values
         del aux
         
-    if ModelConfig.VISUALIZE:
+    if JobConfig.VISUALIZE:
         idx = np.random.randint(0, len(paths_spectrograms))
         spectrogram_path = paths_spectrograms[idx]
         plot_spectrogram(spectrogram_path)
@@ -232,7 +237,7 @@ if __name__ == "__main__":
     for model_weight in model_weights:
 
         test_dataset = CustomDataset(
-            test_df, TARGET_COLS, ModelConfig, all_spectrograms, all_eegs, augment=False, mode="test" )
+            test_df, TARGET_COLS, ModelConfig, all_spectrograms, all_eegs, mode="test" )
         test_loader = DataLoader(
             test_dataset,
             batch_size=ModelConfig.BATCH_SIZE,
