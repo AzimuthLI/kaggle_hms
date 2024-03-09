@@ -281,14 +281,14 @@ if __name__ == "__main__":
     preds = np.array(predictions)
     preds = np.mean(predictions, axis=0)
 
-    preds_min = preds.min(axis=1)[:, np.newaxis]
-    preds_max = preds.max(axis=1)[:, np.newaxis]
-    preds_norm = (preds - preds_min) / (preds_max - preds_min)
+    # preds_min = preds.min(axis=1)[:, np.newaxis]
+    # preds_max = preds.max(axis=1)[:, np.newaxis]
+    # preds_norm = (preds - preds_min) / (preds_max - preds_min)
     
-    preds_norm = preds_norm / preds_norm.sum(axis=1)[:, np.newaxis]
+    # preds_norm = preds_norm / preds_norm.sum(axis=1)[:, np.newaxis]
 
     sub = pd.DataFrame({'eeg_id': test_df.eeg_id.values})
-    sub[TARGET_COLS] = preds_norm #predictions
+    sub[TARGET_COLS] = preds #predictions
 
     print(f'Submissionn shape: {sub.shape}')
     print(sub.head(10))
@@ -297,3 +297,4 @@ if __name__ == "__main__":
     sum_to_one = sub[TARGET_COLS].sum(axis=1)
     print("Sanity check :")
     print(f"All sum to one? {np.allclose(sum_to_one.values, 1)}")
+    sub.to_csv('submission.csv', index=False)
