@@ -173,6 +173,7 @@ class Trainer:
     
     def compute_loss(self, y_pred, y_true):
         criterion = nn.KLDivLoss(reduction="batchmean")
+        # criterion = nn.CrossEntropyLoss()
         return criterion(F.log_softmax(y_pred, dim=1), y_true)
     
     def train(self):
@@ -320,7 +321,7 @@ class HMSPredictor:
         self.model_config = model_config
         self.k_fold = job_config.K_FOLD
         
-        self.logger = get_logger(self.job_config.OUTPUT_DIR, f"{self.model_config.MODEL_NAME}.log")
+        self.logger = get_logger(self.job_config.OUTPUT_DIR, f"{self.model_config.MODEL_NAME}_loss.log")
         self.__log_init_info()
 
 
@@ -448,13 +449,13 @@ class HMSPredictor:
             oof_df2 = pd.concat([oof_df2, valid_folds], axis=0).reset_index(drop=True)
             self._plot_loss(loss_per_fold_2, stage="2")
 
-        oof_df1.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_1.csv"), index=False)
-        oof_df2.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_2.csv"), index=False)
+        oof_df1.to_csv(os.path.join(self.job_config.OUTPUT_DIR, f"{self.model_config.MODEL_NAME}_oof_1.csv"), index=False)
+        oof_df2.to_csv(os.path.join(self.job_config.OUTPUT_DIR, f"{self.model_config.MODEL_NAME}_oof_2.csv"), index=False)
 
         info = f"{'='*100}\nTraining Complete!\n"
         for i, oof_df in enumerate([oof_df1, oof_df2]):
             cv_results = evaluate_oof(oof_df)
-            info += f"CV Result (Stage={i+1}): {cv_results[0]}\n"
+            info += f"CV Result (Stage={i+1}): {cv_results}\n"
         
         info += f"Elapse: {(time()-tik_total) / 60:.2f} min \n{'='*100}"
         self.logger.info(info)
