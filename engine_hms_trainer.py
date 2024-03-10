@@ -110,7 +110,7 @@ def gen_non_overlap_samples(df_csv, targets ):
     return train
 
 
-def load_kaggle_data(paths, use_non_overlap=True, split_entropy=5.5):
+def load_kaggle_data(paths, split_entropy=5.5):
     
     train_csv = pd.read_csv(paths.TRAIN_CSV)
     targets = train_csv.columns[-6:]
@@ -118,22 +118,17 @@ def load_kaggle_data(paths, use_non_overlap=True, split_entropy=5.5):
     train_csv['entropy'] = train_csv.apply(cal_entropy, axis=1, tgt_list=targets)
     train_csv['total_votes'] = train_csv[targets].sum(axis=1)
     
-    if use_non_overlap:
-        train = gen_non_overlap_samples(train_csv, targets)
-    else:
-        train = train_csv
+    easy_csv = train_csv[train_csv['entropy'] >= split_entropy].copy().reset_index(drop=True)
+    hard_csv = train_csv[train_csv['entropy'] < split_entropy].copy().reset_index(drop=True)
+
+    train_easy = gen_non_overlap_samples(easy_csv, targets)
+    train_hard = gen_non_overlap_samples(hard_csv, targets)
     
     all_specs = np.load(paths.PRE_LOADED_SPECTROGRAMS, allow_pickle=True).item()
     all_eegs = np.load(paths.PRE_LOADED_EEGS, allow_pickle=True).item()
     
-    if split_entropy:
-        train_easy = train[train['entropy'] >= split_entropy].copy().reset_index(drop=True)
-        train_hard = train[train['entropy'] < split_entropy].copy().reset_index(drop=True)
-        
-        return train_easy, train_hard, all_specs, all_eegs
-    else:
-        return train, None, all_specs, all_eegs
-    
+    return train_easy, train_hard, all_specs, all_eegs
+
 
 class Trainer:
     
@@ -154,10 +149,7 @@ class Trainer:
         self.device = device
         self.config = config
         self.optimizer, self.scheduler = self.get_optimizer(model, config)
-        
-        if check_point_path:
-            self.load_checkpoint(check_point_path)
-            
+        self.check_point_path = check_point_path
         self.logger = logger
         
     def load_checkpoint(self, checkpoint_path):
@@ -165,7 +157,7 @@ class Trainer:
         
     def get_optimizer(self, model, config):
         
-        optimizer = torch.optim.AdamW(model.parameters(), lr=0.1, weight_decay=config.WEIGHT_DECAY)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=config.WEIGHT_DECAY)
         scheduler = OneCycleLR(
             optimizer,
             max_lr=1e-4,
@@ -175,7 +167,8 @@ class Trainer:
             anneal_strategy="cos",
             final_div_factor=100,
         )
-        
+        # scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=0.5, total_iters=3)
+
         return optimizer, scheduler
     
     def compute_loss(self, y_pred, y_true):
@@ -183,6 +176,9 @@ class Trainer:
         return criterion(F.log_softmax(y_pred, dim=1), y_true)
     
     def train(self):
+
+        if self.check_point_path is not None:
+            self.load_checkpoint(self.check_point_path)
         
         self.model.to(self.device)
         best_loss = np.inf
@@ -207,9 +203,10 @@ class Trainer:
             if valid_loss < best_loss:
                 best_loss = valid_loss
                 best_model_weights = self.model.state_dict()
+                best_valid_preds = valid_preds
                 self.logger.info(f"Best model found in epoch {epoch+1} | valid loss: {best_loss:.4f}")
                
-        return best_model_weights, valid_preds, loss_records
+        return best_model_weights, best_valid_preds, loss_records
 
     def _train_epoch(self, epoch):
         
@@ -293,6 +290,28 @@ class Trainer:
         return losses.avg, np.concatenate(predicts)
     
 
+def evaluate_oof(oof_df):
+    '''
+    Evaluate the out-of-fold dataframe using KL Divergence (torch and kaggle)
+    '''
+    softmax = nn.Softmax(dim=1)
+    kl_loss = nn.KLDivLoss(reduction="batchmean")
+    labels = torch.tensor(oof_df[TARGETS].values)
+    preds = torch.tensor(oof_df[TARGETS_PRED].values)
+    preds = F.log_softmax(preds, dim=1)
+    kl_torch = kl_loss(preds, labels)
+
+    # solution = oof_df[['eeg_id'] + TARGETS].copy()
+    # submission = oof_df[['eeg_id'] + TARGETS_PRED].copy()
+    # submission = submission.rename(columns={f"{lb}_pred": f"{lb}_vote" for lb in BRAIN_ACTIVITY})
+    # submission[TARGETS] = softmax(
+    #     torch.tensor(submission[TARGETS].values.astype('float32'))
+    #     ).numpy()
+    # kl_kaggle = kaggle_score(solution, submission, 'eeg_id')
+
+    return kl_torch #, kl_kaggle
+
+
 class HMSPredictor:
     
     def __init__(self, job_config, model_config):
@@ -300,9 +319,6 @@ class HMSPredictor:
         self.job_config = job_config
         self.model_config = model_config
         self.k_fold = job_config.K_FOLD
-
-        self.oof_df = pd.DataFrame()
-        self.loss_per_fold = []
         
         self.logger = get_logger(self.job_config.OUTPUT_DIR, f"{self.model_config.MODEL_NAME}.log")
         self.__log_init_info()
@@ -327,54 +343,34 @@ class HMSPredictor:
         self.logger.info(f"Output Dir: {self.job_config.OUTPUT_DIR}")
         self.logger.info(f"{'*'*100}")
         
-    def _plot_loss(self, stage):
-        if len(self.loss_per_fold) > 0:
-            fig, ax = plt.subplots(1, 1, figsize=(9, 6))
-            ax.set_xlabel("Epochs")
-            ax.set_ylabel("Loss")
-            ax.grid(True)
-            line_colors = plt.get_cmap('tab10').colors
-            for i, loss in enumerate(self.loss_per_fold):
-                ax.plot(loss['train'], 'o-', c=line_colors[i], label=f"Train {i}")
-                ax.plot(loss['valid'], 'o:', c=line_colors[i], label=f"Valid {i}")
-            ax.set_title(self.model_config.MODEL_NAME + f" Loss Plot ({stage})")
-            ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-            fig.tight_layout()
-            fig.savefig(os.path.join(self.job_config.OUTPUT_DIR, f"{self.model_config.MODEL_NAME}_loss_plot_{stage}.png"))
-            plt.close(fig)
-        else:
-            self.logger.info("No loss records to plot")
+    def _plot_loss(self, loss_per_fold, stage):
+       
+        fig, ax = plt.subplots(1, 1, figsize=(9, 6))
+        ax.set_xlabel("Epochs")
+        ax.set_ylabel("Loss")
+        ax.grid(True)
+        line_colors = plt.get_cmap('tab10').colors
+        for i, loss in enumerate(loss_per_fold):
+            ax.plot(loss['train'], 'o-', c=line_colors[i], label=f"Train {i}")
+            ax.plot(loss['valid'], 'o:', c=line_colors[i], label=f"Valid {i}")
 
+        ax.set_title(self.model_config.MODEL_NAME + f" Loss Plot ({stage})")
+        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        fig.tight_layout()
+        fig.savefig(os.path.join(self.job_config.OUTPUT_DIR, f"{self.model_config.MODEL_NAME}_loss_plot_{stage}.png"))
+        plt.close(fig)
+        
     def load_train_data(self):
         
         train_easy, train_hard, all_specs, all_eegs = load_kaggle_data(
             self.job_config.PATHS, 
-            self.job_config.NON_OVERLAP, 
             self.job_config.ENTROPY_SPLIT
             )
         
         return train_easy, train_hard, all_specs, all_eegs
     
-    def get_results(self):
-        softmax = nn.Softmax(dim=1)
-        kl_loss = nn.KLDivLoss(reduction="batchmean")
-        labels = torch.tensor(self.oof_df[TARGETS].values)
-        preds = torch.tensor(self.oof_df[TARGETS_PRED].values)
-        preds = F.log_softmax(preds, dim=1)
-        result_torch = kl_loss(preds, labels)
-
-        solution = self.oof_df[['eeg_id'] + TARGETS].copy()
-        submission = self.oof_df[['eeg_id'] + TARGETS_PRED].copy()
-        submission = submission.rename(columns={f"{lb}_pred": f"{lb}_vote" for lb in BRAIN_ACTIVITY})
-        submission[TARGETS] = softmax(
-            torch.tensor(submission[TARGETS].values.astype('float32'))
-            ).numpy()
-        result_kaggle = kaggle_score(solution, submission, 'eeg_id')
-
-        return result_torch, result_kaggle
-    
     def train_folds(self, train_easy, train_hard, all_specs, all_eegs):
-        tik = time()
+        
         gkf = GroupKFold(n_splits=self.k_fold)
         
         # split easy and hard data into k-folds
@@ -382,61 +378,87 @@ class HMSPredictor:
         for fold, (train_idx, valid_idx) in enumerate(easy_split):
             train_easy.loc[valid_idx, 'fold'] = fold
         
-        if train_hard is not None:
-            hard_split = gkf.split(train_hard, train_hard['target'], train_hard['patient_id'])
-            for fold, (train_idx, valid_idx) in enumerate(hard_split):
-                train_hard.loc[valid_idx, 'fold'] = fold
+        hard_split = gkf.split(train_hard, train_hard['target'], train_hard['patient_id'])
+        for fold, (train_idx, valid_idx) in enumerate(hard_split):
+            train_hard.loc[valid_idx, 'fold'] = fold
+
+        def get_valid_fold(fold):
+            valid_folds_easy = train_easy[train_easy['fold'] == fold].copy().reset_index(drop=True)
+            valid_folds_easy['easy_or_hard'] = "easy"
+
+            valid_folds_hard = train_hard[train_hard['fold'] == fold].copy().reset_index(drop=True)
+            valid_folds_hard['easy_or_hard'] = "hard"
+
+            return pd.concat([valid_folds_easy, valid_folds_hard], axis=0).reset_index(drop=True)
+
+        valid_folds_list = [get_valid_fold(fold) for fold in range(self.k_fold)]
         
-        # fist stage training
+        oof_df1, oof_df2 = pd.DataFrame(), pd.DataFrame()
+        loss_per_fold_1, loss_per_fold_2 = [], []
+
+        tik_total = time()
         for fold in range(self.k_fold):
-            self.logger.info(f"{'='*100}\nFold: {fold} First Training\n{'='*100}")
+
+            tik = time()
             
-            train_folds = train_easy[train_easy['fold'] != fold].reset_index(drop=True)
-            valid_folds = train_easy[train_easy['fold'] == fold].reset_index(drop=True)
-                
-            valid_preds, loss_records = self._train_fold(fold, train_folds, valid_folds, all_specs, all_eegs, stage=1)
+            train_folds_easy = train_easy[train_easy['fold'] != fold].copy().reset_index(drop=True)
+            train_folds_hard = train_hard[train_hard['fold'] != fold].copy().reset_index(drop=True)
+
+            valid_folds = valid_folds_list[fold]
+
+            # first stage with easy samples
+            self.logger.info(f"{'='*100}\nFold: {fold} || Valid size {valid_folds.shape[0]} \n{'='*100}")
+            self.logger.info(f"- First Stage ")
+            valid_predicts, loss_records = self._train_fold(
+                fold, train_folds_easy, valid_folds, all_specs, all_eegs, stage=1, check_point=None)
             
-            self.loss_per_fold.append(loss_records)
-            valid_folds[TARGETS_PRED] = valid_preds
-            self.oof_df = pd.concat([self.oof_df, valid_folds], axis=0).reset_index(drop=True)
-            
-            self._plot_loss(stage="1")
-        
-        cv_results = self.get_results()
-        info = f"{'='*100}\nCV Result (Stage=1): {cv_results[0]} (torch) | {cv_results[1]} (kaggle)\n"
-        info += f"Elapse: {(time()-tik) / 60:.2f} min \n{'='*100}"
-        self.logger.info(info)
-        self.oof_df.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_1.csv"), index=False)
-        
-        if train_hard is not None:
-            self.oof_df = pd.DataFrame()
-            self.loss_per_fold = []
-            # second stage training
-            for fold in range(self.k_fold):
-                self.logger.info(f"{'='*100}\nFold: {fold} Second training\n{'='*100}")
-                
-                train_folds = train_hard[train_hard['fold'] != fold].reset_index(drop=True)
-                valid_folds = train_hard[train_hard['fold'] == fold].reset_index(drop=True)
-                
-                check_point = os.path.join(
-                    self.job_config.OUTPUT_DIR, 
-                    f"{self.model_config.MODEL_NAME}_fold_{fold}_stage_1.pth"
-                    )
-                    
-                valid_preds, loss_records = self._train_fold(
-                    fold, train_folds, valid_folds, all_specs, all_eegs, stage=2, check_point=check_point)
-                
-                self.loss_per_fold.append(loss_records)
-                valid_folds[TARGETS_PRED] = valid_preds
-                self.oof_df = pd.concat([self.oof_df, valid_folds], axis=0).reset_index(drop=True)
-                
-                self._plot_loss(stage="2")
-                
-            cv_results = self.get_results()
-            info = f"{'='*100}\nCV Result (Stage=2): {cv_results[0]} (torch) | {cv_results[1]} (kaggle)\n"
+            loss_per_fold_1.append(loss_records)
+
+            valid_folds[TARGETS_PRED] = valid_predicts
+            kl_torch_easy = evaluate_oof(valid_folds[valid_folds['easy_or_hard'] == "easy"])
+            kl_torch_hard = evaluate_oof(valid_folds[valid_folds['easy_or_hard'] == "hard"])
+            info = f"{'='*100}\nFold {fold} Valid Loss: (Easy) {kl_torch_easy:.4f} | (Hard) {kl_torch_hard:.4f}\n"
             info += f"Elapse: {(time()-tik) / 60:.2f} min \n{'='*100}"
             self.logger.info(info)
-            self.oof_df.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_2.csv"), index=False)
+
+            oof_df1 = pd.concat([oof_df1, valid_folds], axis=0).reset_index(drop=True)
+            self._plot_loss(loss_per_fold_1, stage="1")
+
+            # second stage with hard samples
+            tik = time()
+            self.logger.info(f"- Second Stage ")
+            check_point = os.path.join(
+                self.job_config.OUTPUT_DIR, 
+                f"{self.model_config.MODEL_NAME}_fold_{fold}_stage_1.pth"
+                )
+            self.logger.info(f"Use Checkpoint: {check_point.split('/')[-1]}")
+
+            valid_predicts, loss_records = self._train_fold(
+                fold, train_folds_hard, valid_folds, all_specs, all_eegs, stage=1, check_point=check_point)
+            
+            loss_per_fold_2.append(loss_records)
+
+            valid_folds[TARGETS_PRED] = valid_predicts
+            kl_torch_easy = evaluate_oof(valid_folds[valid_folds['easy_or_hard'] == "easy"])
+            kl_torch_hard = evaluate_oof(valid_folds[valid_folds['easy_or_hard'] == "hard"])
+            info = f"{'='*100}\nFold {fold} Valid Loss: (Easy) {kl_torch_easy:.4f} | (Hard) {kl_torch_hard:.4f}\n"
+            info += f"Elapse: {(time()-tik) / 60:.2f} min \n{'='*100}"
+            self.logger.info(info)
+
+            oof_df2 = pd.concat([oof_df2, valid_folds], axis=0).reset_index(drop=True)
+            self._plot_loss(loss_per_fold_2, stage="2")
+
+        info = f"{'='*100}\nTraining Complete!\n"
+        for i, oof_df in enumerate([oof_df1, oof_df2]):
+            cv_results = evaluate_oof(oof_df)
+            info += f"CV Result (Stage={i+1}): {cv_results[0]} (torch) | {cv_results[1]} (kaggle)\n"
+        
+        info += f"Elapse: {(time()-tik_total) / 60:.2f} min \n{'='*100}"
+        self.logger.info(info)
+
+        oof_df1.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_1.csv"), index=False)
+        oof_df2.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_2.csv"), index=False)
+        
     
     def _train_fold(self, fold_id, train_folds, valid_folds, all_specs, all_eegs, stage=1, check_point=None):
         

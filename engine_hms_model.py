@@ -40,7 +40,6 @@ class JobConfig:
     OUTPUT_DIR = KagglePaths.OUTPUT_DIR if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths.OUTPUT_DIR
     PATHS = KagglePaths if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths
     K_FOLD = 5
-    NON_OVERLAP = True
     ENTROPY_SPLIT = 5.5 
     VISUALIZE = True
 
