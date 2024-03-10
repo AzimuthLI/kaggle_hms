@@ -434,7 +434,7 @@ class HMSPredictor:
             self.logger.info(f"Use Checkpoint: {check_point.split('/')[-1]}")
 
             valid_predicts, loss_records = self._train_fold(
-                fold, train_folds_hard, valid_folds, all_specs, all_eegs, stage=1, check_point=check_point)
+                fold, train_folds_hard, valid_folds, all_specs, all_eegs, stage=2, check_point=check_point)
             
             loss_per_fold_2.append(loss_records)
 
@@ -448,16 +448,18 @@ class HMSPredictor:
             oof_df2 = pd.concat([oof_df2, valid_folds], axis=0).reset_index(drop=True)
             self._plot_loss(loss_per_fold_2, stage="2")
 
+        oof_df1.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_1.csv"), index=False)
+        oof_df2.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_2.csv"), index=False)
+
         info = f"{'='*100}\nTraining Complete!\n"
         for i, oof_df in enumerate([oof_df1, oof_df2]):
             cv_results = evaluate_oof(oof_df)
-            info += f"CV Result (Stage={i+1}): {cv_results[0]} (torch) | {cv_results[1]} (kaggle)\n"
+            info += f"CV Result (Stage={i+1}): {cv_results[0]}\n"
         
         info += f"Elapse: {(time()-tik_total) / 60:.2f} min \n{'='*100}"
         self.logger.info(info)
 
-        oof_df1.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_1.csv"), index=False)
-        oof_df2.to_csv(os.path.join(self.job_config.OUTPUT_DIR, "oof_2.csv"), index=False)
+        
         
     
     def _train_fold(self, fold_id, train_folds, valid_folds, all_specs, all_eegs, stage=1, check_point=None):

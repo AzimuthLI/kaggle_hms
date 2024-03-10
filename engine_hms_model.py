@@ -329,3 +329,7 @@ class CustomModel(nn.Module):
         x = self.features(x)
         x = self.custom_layers(x)
         return x
+    
+
+
+# class CustomVITMAE()
