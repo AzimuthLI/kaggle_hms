@@ -99,8 +99,8 @@ def gen_non_overlap_samples(df_csv, targets):
     train = groupby.agg(agg_dict)
     train = train.reset_index()
     train.columns = ['_'.join(col).strip() for col in train.columns.values]
-    train.columns = tgt_list + ["eeg_id", 'spectrogram_id', 'min', 'max', 'patient_id', 'target']
-
+    train.columns = ["eeg_id"] + tgt_list + ['spectrogram_id', 'min', 'max', 'patient_id', 'target']
+    
     vote_sum = train[tgt_list]
     train[tgt_list] = vote_sum.div(vote_sum.sum(axis=1), axis=0)
 
