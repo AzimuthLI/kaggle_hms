@@ -53,6 +53,7 @@ class ModelConfig:
     DROP_RATE = 0.15 # default: 0.1
     DROP_PATH_RATE = 0.25 # default: 0.2
     WEIGHT_DECAY = 0.01
+    REGULARIZATION = None
     DROP_RATE = 0.15 # default: 0.1
     DROP_PATH_RATE = 0.25 # default: 0.2
     USE_KAGGLE_SPECTROGRAMS = True

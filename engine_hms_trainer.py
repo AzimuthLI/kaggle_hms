@@ -151,6 +151,8 @@ class Trainer:
         self.optimizer, self.scheduler = self.get_optimizer(model, config)
         self.check_point_path = check_point_path
         self.logger = logger
+
+        self.criterion = nn.KLDivLoss(reduction="batchmean")
         
     def load_checkpoint(self, checkpoint_path):
         self.model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
@@ -172,10 +174,18 @@ class Trainer:
         return optimizer, scheduler
     
     def compute_loss(self, y_pred, y_true):
-        criterion = nn.KLDivLoss(reduction="batchmean")
-        # criterion = nn.CrossEntropyLoss()
-        return criterion(F.log_softmax(y_pred, dim=1), y_true)
-    
+        
+        original_loss = self.criterion(F.log_softmax(y_pred, dim=1), y_true)
+
+        # Regularization term: KL divergence between predictions and uniform distribution
+        if (self.config.REGULARIZATION == 0) or (self.config.REGULARIZATION is None):
+            return original_loss
+        else:
+            uniform_dist = torch.ones_like(y_pred) / y_pred.size(1)
+            kl_div_uniform = self.criterion(F.log_softmax(y_pred, dim=1), uniform_dist)
+
+            return original_loss + self.config.REGULARIZATION * kl_div_uniform
+
     def train(self):
 
         if self.check_point_path is not None:
@@ -339,6 +349,7 @@ class HMSPredictor:
         self.logger.info(f"Augment: {self.model_config.AUGMENT}")
         if self.model_config.AUGMENT:
             self.logger.info(f"Augmentations: {self.model_config.AUGMENTATIONS}")
+        self.logger.info(f"Regularization: {self.model_config.REGULARIZATION}")
         self.logger.info(f"Enropy Split: {self.job_config.ENTROPY_SPLIT}")
         self.logger.info(f"Device: {DEVICE}")
         self.logger.info(f"Output Dir: {self.job_config.OUTPUT_DIR}")
