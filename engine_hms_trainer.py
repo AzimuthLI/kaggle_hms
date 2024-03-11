@@ -6,7 +6,7 @@ import pandas as pd
 import os, gc
 from time import time, ctime
 
-from scipy.special import rel_entr
+from scipy.special import rel_entr, softmax
 from sklearn.model_selection import GroupKFold, KFold
 import matplotlib.pyplot as plt
 
@@ -103,6 +103,8 @@ def gen_non_overlap_samples(df_csv, targets):
     
     vote_sum = train[tgt_list]
     train[tgt_list] = vote_sum.div(vote_sum.sum(axis=1), axis=0)
+    # from scipy.special import softmax
+    # train[tgt_list] = softmax(train[tgt_list].values, axis=1)
 
     return train
 
@@ -148,6 +150,8 @@ class Trainer:
         self.check_point_path = check_point_path
         self.logger = logger
 
+        self.criterion = nn.KLDivLoss(reduction="batchmean")
+
     def load_checkpoint(self, checkpoint_path):
         self.model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
 
@@ -168,9 +172,9 @@ class Trainer:
         return optimizer, scheduler
 
     def compute_loss(self, y_pred, y_true):
-        criterion = nn.KLDivLoss(reduction="batchmean")
+        # criterion = nn.KLDivLoss(reduction="batchmean")
         # criterion = nn.CrossEntropyLoss()
-        return criterion(F.log_softmax(y_pred, dim=1), y_true)
+        return self.criterion(F.log_softmax(y_pred, dim=1), y_true)
 
     def train(self):
 
