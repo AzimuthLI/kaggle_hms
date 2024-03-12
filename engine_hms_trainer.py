@@ -176,8 +176,8 @@ class Trainer:
     def compute_loss(self, y_pred, y_true):
         # criterion = nn.KLDivLoss(reduction="batchmean")
         # criterion = nn.CrossEntropyLoss()
-        # return self.criterion(F.log_softmax(y_pred, dim=1), y_true)
-        return self.criterion(torch.log(y_pred), y_true)
+        return self.criterion(F.log_softmax(y_pred, dim=1), y_true)
+        # return self.criterion(torch.log(y_pred), y_true)
 
     def train(self):
 
@@ -300,9 +300,9 @@ def evaluate_oof(oof_df):
     '''
     softmax = nn.Softmax(dim=1)
     kl_loss = nn.KLDivLoss(reduction="batchmean")
-    labels = torch.tensor(oof_df[TARGETS].values)
-    preds = torch.tensor(oof_df[TARGETS_PRED].values)
-    preds = F.log_softmax(preds, dim=1)
+    labels = torch.tensor(oof_df[TARGETS].values.astype('float32'))
+    preds = softmax(torch.tensor(oof_df[TARGETS_PRED].values.astype('float32')))
+    preds = torch.log(preds)
     kl_torch = kl_loss(preds, labels)
 
     # solution = oof_df[['eeg_id'] + TARGETS].copy()
