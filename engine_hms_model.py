@@ -12,6 +12,34 @@ import random
 from torch.nn import functional as F
 from transformers import ViTMAEModel, ViTMAEConfig
 
+DEFAULT_VITMAE_CONFIG = {
+    "architectures": [
+        "ViTMAEForPreTraining"
+    ],
+    "attention_probs_dropout_prob": 0.0,
+    "decoder_hidden_size": 512,
+    "decoder_intermediate_size": 2048,
+    "decoder_num_attention_heads": 16,
+    "decoder_num_hidden_layers": 8,
+    "hidden_act": "gelu",
+    "hidden_dropout_prob": 0.0,
+    "hidden_size": 768,
+    "image_size": 224,
+    "initializer_range": 0.02,
+    "intermediate_size": 3072,
+    "layer_norm_eps": 1e-12,
+    "mask_ratio": 0.75,
+    "model_type": "vit_mae",
+    "norm_pix_loss": False,
+    "num_attention_heads": 12,
+    "num_channels": 3,
+    "num_hidden_layers": 12,
+    "patch_size": 16,
+    "qkv_bias": True,
+    "torch_dtype": "float32",
+    "transformers_version": "4.16.0.dev0"
+    }
+
 class KagglePaths:
     OUTPUT_DIR = "/kaggle/working/"
     PRE_LOADED_EEGS = '/kaggle/input/brain-eeg-spectrograms/eeg_specs.npy'
@@ -341,13 +369,13 @@ class CustomVITMAE(nn.Module):
         super(CustomVITMAE, self).__init__()
 
         # Load the ViTMAE configuration and model as before
-        mae_config = ViTMAEConfig.from_pretrained('facebook/vit-mae-base')
+        mae_config = DEFAULT_VITMAE_CONFIG.copy()
         mae_config.hidden_dropout_prob = config.MAE_HIDDEN_DROPOUT_PROB
         mae_config.attention_probs_dropout_prob = config.MAE_ATTENTION_DROPOUT_PROB
 
         if pretrained:
             self.vitmae = ViTMAEModel.from_pretrained(
-                config.MAE_PRETRAINED_WEIGHTS,config=mae_config)
+                config.MAE_PRETRAINED_WEIGHTS, config=mae_config)
         else:
             self.vitmae = ViTMAEModel(config=mae_config)
 
