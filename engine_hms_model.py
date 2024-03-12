@@ -9,7 +9,8 @@ import torch.nn as nn
 from torchvision.transforms import v2
 import timm
 import random
-
+from torch.nn import functional as F
+from transformers import ViTMAEModel, ViTMAEConfig
 
 class KagglePaths:
     OUTPUT_DIR = "/kaggle/working/"
@@ -66,6 +67,9 @@ class ModelConfig:
     NUM_FROZEN_LAYERS = 0
     NUM_WORKERS = 0 
     MAX_GRAD_NORM = 1e7
+    MAE_PRETRAINED_WEIGHTS = 'facebook/vit-mae-base'
+    MAE_HIDDEN_DROPOUT_PROB = 0.05
+    MAE_ATTENTION_DROPOUT_PROB = 0.05
 
 
 # AUGMENTATIONS
@@ -286,10 +290,10 @@ class CustomDataset(Dataset):
         return x, y
 
 
-class CustomModel(nn.Module):
+class CustomEfficientNET(nn.Module):
 
     def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
-        super(CustomModel, self).__init__()
+        super(CustomEfficientNET, self).__init__()
         
         self.config = config
 
@@ -305,9 +309,7 @@ class CustomModel(nn.Module):
         self.custom_layers = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(self.model.num_features, 512),
-            nn.GELU(),
-            nn.Linear(512, num_classes),
+            nn.Linear(self.model.num_features, num_classes)
         )
     
     def __reshape_input(self, x): # <- [(C=8) x (H=128) x (W=256)]
@@ -332,7 +334,42 @@ class CustomModel(nn.Module):
         x = self.features(x)
         x = self.custom_layers(x)
         return x
+
+
+class CustomVITMAE(nn.Module):
+    def __init__(self, config, num_classes=6, pretrained=None):
+        super(CustomVITMAE, self).__init__()
+
+        # Load the ViTMAE configuration and model as before
+        mae_config = ViTMAEConfig.from_pretrained('facebook/vit-mae-base')
+        mae_config.hidden_dropout_prob = config.MAE_HIDDEN_DROPOUT_PROB
+        mae_config.attention_probs_dropout_prob = config.MAE_ATTENTION_DROPOUT_PROB
+
+        if pretrained:
+            self.vitmae = ViTMAEModel.from_pretrained(
+                config.MAE_PRETRAINED_WEIGHTS,config=mae_config)
+        else:
+            self.vitmae = ViTMAEModel(config=mae_config)
+
+        # Assumes the [CLS] token (or equivalent) is at position 0 
+        # and directly usable for classification
+        self.classifier = nn.Linear(self.vitmae.config.hidden_size, num_classes)
+
+    def __reshape_input(self, x): # <- (N, C=8, H=128, W=256)
+
+        concat_p1 = torch.cat(torch.chunk(x[:, :4, :, :], 4, dim=1), dim=2)
+        concat_p2 = torch.cat(torch.chunk(x[:, 4:, :, :], 4, dim=1), dim=2)
+        x_concat = torch.cat((concat_p1, concat_p2), dim=3)
+       
+        resized = F.interpolate(x_concat, size=(224, 224), mode='bilinear', align_corners=False)
+        stacked = resized.repeat(1, 3, 1, 1)
+        
+        return stacked #-> (N, C=3, H=224, W=224)
     
+    def forward(self, x):
+        x = self.__reshape_input(x)
+        outputs = self.vitmae(pixel_values=x)
+        sequence_output = outputs.last_hidden_state
+        logits = self.classifier(sequence_output[:, 0, :])
 
-
-# class CustomVITMAE()
+        return logits

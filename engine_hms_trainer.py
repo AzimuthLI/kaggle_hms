@@ -19,7 +19,7 @@ from torch.cuda.amp import autocast, GradScaler
 import torch.nn.functional as F
 
 from kl_divergence import score as kaggle_score
-from engine_hms_model import CustomDataset, CustomModel
+from engine_hms_model import CustomDataset, CustomEfficientNET, CustomVITMAE
 
 # CONSTANTS
 BRAIN_ACTIVITY = ['seizure', 'lpd', 'gpd', 'lrda', 'grda', 'other']
@@ -27,7 +27,6 @@ TARGETS = [f"{lb}_vote" for lb in BRAIN_ACTIVITY]
 TARGETS_PRED = [f"{lb}_pred" for lb in BRAIN_ACTIVITY]
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 # FUNCTIONS
 def seed_everything(seed: int):
@@ -328,22 +327,23 @@ class HMSPredictor:
         self.__log_init_info()
 
     def get_model(self, pretrained=True):
-        return CustomModel(self.model_config, num_classes=6, pretrained=pretrained)
+        backbone = self.model_config.MODEL_BACKBONE
+
+        if "efficientnet" in backbone:
+            return CustomEfficientNET(self.model_config, num_classes=6, pretrained=pretrained)
+        elif "vit" in backbone:
+            return CustomVITMAE(self.model_config, num_classes=6, pretrained=pretrained)
+        else:
+            return None
 
     def __log_init_info(self):
 
         self.logger.info(f"{'*' * 100}")
         self.logger.info(f"Script Start: {ctime()}")
-        self.logger.info(f"Initializing HMS Predictor...")
-        self.logger.info(f"Model Name: {self.model_config.MODEL_NAME}")
-        self.logger.info(f"Drop Rate: {self.model_config.DROP_RATE}")
-        self.logger.info(f"Drop Path Rate: {self.model_config.DROP_PATH_RATE}")
-        self.logger.info(f"Augment: {self.model_config.AUGMENT}")
-        if self.model_config.AUGMENT:
-            self.logger.info(f"Augmentations: {self.model_config.AUGMENTATIONS}")
-        self.logger.info(f"Enropy Split: {self.job_config.ENTROPY_SPLIT}")
-        self.logger.info(f"Device: {DEVICE}")
-        self.logger.info(f"Output Dir: {self.job_config.OUTPUT_DIR}")
+        self.logger.info(f"Model Configurations:")
+        for key, value in self.model_config.__dict__.items():
+            if not key.startswith("__"):
+                self.logger.info(f"{key}: {value}")
         self.logger.info(f"{'*' * 100}")
 
     def _plot_loss(self, loss_per_fold, stage):
