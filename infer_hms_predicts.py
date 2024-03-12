@@ -171,7 +171,7 @@ def inference_function(test_loader, model):
             batch_size = y.size(0)
             with torch.no_grad():
                 y_preds = model(X)
-            y_preds = softmax(y_preds)
+            # y_preds = softmax(y_preds)
             preds.append(y_preds.to('cpu').numpy()) 
                 
     prediction_dict["predictions"] = np.concatenate(preds) 
@@ -186,10 +186,10 @@ if __name__ == "__main__":
 
     ModelConfig.EPOCHS = 6
     ModelConfig.USE_EEG_SPECTROGRAMS = False
-    ModelConfig.MODEL_BACKBONE = 'tf_efficientnet_b0'
-    ModelConfig.MODEL_NAME = "ENet_b0_two_stages"
+    ModelConfig.MODEL_BACKBONE = 'tf_efficientnet_b2'
+    ModelConfig.MODEL_NAME = "ENet_b2_softmax"
     
-    model_dir = "./outputs/model_b0_two_stage_only_kaggle"
+    model_dir = "./outputs"
 
     model_weights = [x for x in glob(f"{model_dir}/{ModelConfig.MODEL_NAME}_fold_*_stage_2.pth")]
     print(f"{'-'*10}\nModel Weights")

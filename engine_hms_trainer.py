@@ -77,6 +77,8 @@ def cal_entropy(row, tgt_list):
 
 
 def gen_non_overlap_samples(df_csv, targets):
+    from scipy.special import softmax
+
     # Reference Discussion:
     # https://www.kaggle.com/competitions/hms-harmful-brain-activity-classification/discussion/467021
 
@@ -103,7 +105,7 @@ def gen_non_overlap_samples(df_csv, targets):
     
     vote_sum = train[tgt_list]
     train[tgt_list] = vote_sum.div(vote_sum.sum(axis=1), axis=0)
-    # from scipy.special import softmax
+    
     # train[tgt_list] = softmax(train[tgt_list].values, axis=1)
 
     return train
@@ -174,7 +176,8 @@ class Trainer:
     def compute_loss(self, y_pred, y_true):
         # criterion = nn.KLDivLoss(reduction="batchmean")
         # criterion = nn.CrossEntropyLoss()
-        return self.criterion(F.log_softmax(y_pred, dim=1), y_true)
+        # return self.criterion(F.log_softmax(y_pred, dim=1), y_true)
+        return self.criterion(torch.log(y_pred), y_true)
 
     def train(self):
 
@@ -353,7 +356,7 @@ class HMSPredictor:
         for i, loss in enumerate(loss_per_fold):
             ax.plot(loss['train'], 'o-', c=line_colors[i], label=f"Train {i}")
             ax.plot(loss['valid'], 'o:', c=line_colors[i], label=f"Valid {i}")
-
+        ax.set_ylim(0, 1)
         ax.set_title(self.model_config.MODEL_NAME + f" Loss Plot ({stage})")
         ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
         fig.tight_layout()

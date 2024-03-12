@@ -305,7 +305,8 @@ class CustomModel(nn.Module):
         self.custom_layers = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(self.model.num_features, num_classes)
+            nn.Linear(self.model.num_features, num_classes),
+            nn.Softmax()
         )
     
     def __reshape_input(self, x): # <- [(C=8) x (H=128) x (W=256)]
