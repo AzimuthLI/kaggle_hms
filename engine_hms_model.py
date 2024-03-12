@@ -40,6 +40,7 @@ DEFAULT_VITMAE_CONFIG = {
     "transformers_version": "4.16.0.dev0"
     }
 
+
 class KagglePaths:
     OUTPUT_DIR = "/kaggle/working/"
     PRE_LOADED_EEGS = '/kaggle/input/brain-eeg-spectrograms/eeg_specs.npy'
@@ -369,7 +370,7 @@ class CustomVITMAE(nn.Module):
         super(CustomVITMAE, self).__init__()
 
         # Load the ViTMAE configuration and model as before
-        mae_config = DEFAULT_VITMAE_CONFIG.copy()
+        mae_config = ViTMAEConfig.from_dict(DEFAULT_VITMAE_CONFIG)
         mae_config.hidden_dropout_prob = config.MAE_HIDDEN_DROPOUT_PROB
         mae_config.attention_probs_dropout_prob = config.MAE_ATTENTION_DROPOUT_PROB
 
