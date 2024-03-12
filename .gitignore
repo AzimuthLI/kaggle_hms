@@ -10,7 +10,7 @@ example_figures/
 *.parquet
 inputs/
 outputs/
-
+.idea
 .DS_Store
 
 # -- Python --
