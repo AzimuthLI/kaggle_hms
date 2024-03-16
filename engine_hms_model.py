@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from typing import List, Dict
 
 import torch
@@ -56,7 +57,7 @@ class KagglePaths:
 class LocalPaths:
     OUTPUT_DIR = "./outputs/"
     PRE_LOADED_EEGS = './inputs/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTROGRAMS = './inputs/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTOGRAMS = './inputs/brain-spectrograms/specs.npy'
     TRAIN_CSV = "./inputs/hms-harmful-brain-activity-classification/train.csv"
     TRAIN_EEGS = "./inputs/hms-harmful-brain-activity-classification/train_eegs"
     TRAIN_SPECTROGRAMS = "./inputs/hms-harmful-brain-activity-classification/train_spectrograms"
@@ -65,16 +66,9 @@ class LocalPaths:
     TEST_EEGS = "./inputs/hms-harmful-brain-activity-classification/test_eegs"
 
 
-class JobConfig:
-    SEED = 20
-    OUTPUT_DIR = KagglePaths.OUTPUT_DIR if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths.OUTPUT_DIR
-    PATHS = KagglePaths if os.path.exists(KagglePaths.OUTPUT_DIR) else LocalPaths
-    K_FOLD = 5
-    ENTROPY_SPLIT = 5.5 
-    VISUALIZE = True
-
-
 class ModelConfig:
+    SEED = 20
+    SPLIT_ENTROPY = 5.5
     MODEL_NAME = "EfficientNet_b2_two_stage"
     MODEL_BACKBONE = "tf_efficientnet_b2"
     BATCH_SIZE = 16
@@ -382,7 +376,13 @@ class CustomVITMAE(nn.Module):
 
         # Assumes the [CLS] token (or equivalent) is at position 0 
         # and directly usable for classification
-        self.classifier = nn.Linear(self.vitmae.config.hidden_size, num_classes)
+        # self.classifier = nn.Linear(self.vitmae.config.hidden_size, num_classes)
+        self.classifier = nn.Sequential(
+            nn.Linear(self.vitmae.config.hidden_size, 512),
+            nn.GELU(),
+            nn.Dropout(config.DROP_RATE),
+            nn.Linear(512, num_classes)
+        )
 
     def __reshape_input(self, x): # <- (N, C=8, H=128, W=256)
 
@@ -402,3 +402,57 @@ class CustomVITMAE(nn.Module):
         logits = self.classifier(sequence_output[:, 0, :])
 
         return logits
+    
+
+    # class DualEncoderModel(nn.Module):
+    #     def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
+    #         super(DualEncoderModel, self).__init__()
+    #         self.USE_KAGGLE_SPECTROGRAMS = True
+    #         self.USE_EEG_SPECTROGRAMS = True
+    #         self.eeg_model = timm.create_model(
+    #             config.MODEL,
+    #             pretrained=pretrained,
+    #             drop_rate = 0.1,
+    #             drop_path_rate = 0.2,
+    #         )
+    #         self.spec_model = timm.create_model(
+    #             config.MODEL,
+    #             pretrained=pretrained,
+    #             drop_rate = 0.1,
+    #             drop_path_rate = 0.2,
+    #         )
+            
+    #         self.preprocess = torch.nn.Conv2d(4, 3, 1, bias=True)
+            
+    #         if config.FREEZE:
+    #             for i,(name, param) in enumerate(list(self.model.named_parameters())\
+    #                                             [0:config.NUM_FROZEN_LAYERS]):
+    #                 param.requires_grad = False
+
+    #         self.eeg_features = nn.Sequential(*list(self.eeg_model.children())[:-2])
+    #         self.spec_features = nn.Sequential(*list(self.spec_model.children())[:-2])
+    #         self.custom_layers = nn.Sequential(
+    #             nn.AdaptiveAvgPool2d(1),
+    #             nn.Flatten(),
+    #             nn.Linear(self.eeg_model.num_features, num_classes)
+    #         )
+
+    #     def __reshape_input(self, x):
+    #         # input size: [batch * 128 * 256 * 8]
+            
+    #         ## --> 256*512*3 for 2 parts
+    #         spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
+    #         eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
+    #         spec = torch.cat([spectograms, spectograms, spectograms], dim=3)
+    #         spec = spec.permute(0, 3, 1, 2)
+    #         eeg = torch.cat([eegs, eegs, eegs], dim=3)
+    #         eeg = eeg.permute(0, 3, 1, 2)
+            
+    #         return eeg, spec
+        
+    #     def forward(self, x):
+    #         eeg, spec = self.__reshape_input(x)
+    #         eeg_feature = self.eeg_features(eeg)
+    #         spec_feature = self.spec_features(spec)
+    #         x = self.custom_layers(eeg_feature + spec_feature)
+    #         return x
