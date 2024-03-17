@@ -404,55 +404,61 @@ class CustomVITMAE(nn.Module):
         return logits
     
 
-    # class DualEncoderModel(nn.Module):
-    #     def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
-    #         super(DualEncoderModel, self).__init__()
-    #         self.USE_KAGGLE_SPECTROGRAMS = True
-    #         self.USE_EEG_SPECTROGRAMS = True
-    #         self.eeg_model = timm.create_model(
-    #             config.MODEL,
-    #             pretrained=pretrained,
-    #             drop_rate = 0.1,
-    #             drop_path_rate = 0.2,
-    #         )
-    #         self.spec_model = timm.create_model(
-    #             config.MODEL,
-    #             pretrained=pretrained,
-    #             drop_rate = 0.1,
-    #             drop_path_rate = 0.2,
-    #         )
-            
-    #         self.preprocess = torch.nn.Conv2d(4, 3, 1, bias=True)
-            
-    #         if config.FREEZE:
-    #             for i,(name, param) in enumerate(list(self.model.named_parameters())\
-    #                                             [0:config.NUM_FROZEN_LAYERS]):
-    #                 param.requires_grad = False
+class DualEncoderModel(nn.Module):
+    def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
+        super(DualEncoderModel, self).__init__()
 
-    #         self.eeg_features = nn.Sequential(*list(self.eeg_model.children())[:-2])
-    #         self.spec_features = nn.Sequential(*list(self.spec_model.children())[:-2])
-    #         self.custom_layers = nn.Sequential(
-    #             nn.AdaptiveAvgPool2d(1),
-    #             nn.Flatten(),
-    #             nn.Linear(self.eeg_model.num_features, num_classes)
-    #         )
+        self.eeg_model = timm.create_model(
+            'tf_efficientnet_b1',
+            pretrained=pretrained,
+            drop_rate = 0.1,
+            drop_path_rate = 0.2,
+        )
 
-    #     def __reshape_input(self, x):
-    #         # input size: [batch * 128 * 256 * 8]
-            
-    #         ## --> 256*512*3 for 2 parts
-    #         spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
-    #         eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
-    #         spec = torch.cat([spectograms, spectograms, spectograms], dim=3)
-    #         spec = spec.permute(0, 3, 1, 2)
-    #         eeg = torch.cat([eegs, eegs, eegs], dim=3)
-    #         eeg = eeg.permute(0, 3, 1, 2)
-            
-    #         return eeg, spec
+        self.spec_model = timm.create_model(
+            'tf_efficientnet_b1',
+            pretrained=pretrained,
+            drop_rate = 0.1,
+            drop_path_rate = 0.2,
+        )
         
-    #     def forward(self, x):
-    #         eeg, spec = self.__reshape_input(x)
-    #         eeg_feature = self.eeg_features(eeg)
-    #         spec_feature = self.spec_features(spec)
-    #         x = self.custom_layers(eeg_feature + spec_feature)
-    #         return x
+        if config.FREEZE:
+            for i,(name, param) in enumerate(list(self.model.named_parameters())\
+                                            [0:config.NUM_FROZEN_LAYERS]):
+                param.requires_grad = False
+
+        self.eeg_features = nn.Sequential(*list(self.eeg_model.children())[:-2])
+        self.spec_features = nn.Sequential(*list(self.spec_model.children())[:-2])
+        self.custom_layers = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(self.eeg_model.num_features, num_classes)
+        )
+
+    def __reshape_input(self, x):
+        # # raw implementation
+        # # input size: [batch * 128 * 256 * 8]
+        # ## --> 256*512*3 for 2 parts
+        # spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
+        # eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
+        # spec = torch.cat([spectograms, spectograms, spectograms], dim=3)
+        # spec = spec.permute(0, 3, 1, 2)
+        # eeg = torch.cat([eegs, eegs, eegs], dim=3)
+        # eeg = eeg.permute(0, 3, 1, 2)
+
+        # new implementation
+        # input size: [N, C=8, H=128, W=256]
+        specs = torch.cat([x[:, i:i+1, :, :] for i in range(4)], dim=2) #-> [N, 1, 512, 256]
+        specs = torch.cat([specs]*3, dim=1) #-> [N, 3, 512, 256]
+
+        eegs = torch.cat([x[:, i:i+1, :, :] for i in range(4, 8)], dim=2) #-> [N, 1, 512, 256]
+        eegs = torch.cat([eegs]*3, dim=1) #-> [N, 3, 512, 256]
+        
+        return eegs, specs
+    
+    def forward(self, x):
+        eeg, spec = self.__reshape_input(x)
+        eeg_feature = self.eeg_features(eeg)
+        spec_feature = self.spec_features(spec)
+        x = self.custom_layers(eeg_feature + spec_feature)
+        return x

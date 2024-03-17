@@ -19,7 +19,7 @@ from torch.cuda.amp import autocast, GradScaler
 import torch.nn.functional as F
 
 from kl_divergence import score as kaggle_score
-from engine_hms_model import CustomDataset, CustomEfficientNET, CustomVITMAE
+from engine_hms_model import CustomDataset, CustomEfficientNET, CustomVITMAE, DualEncoderModel
 
 
 # CONSTANTS
@@ -232,11 +232,11 @@ def evaluate_oof(oof_df):
     '''
     Evaluate the out-of-fold dataframe using KL Divergence (torch and kaggle)
     '''
-    softmax = nn.Softmax(dim=1)
     kl_loss = nn.KLDivLoss(reduction="batchmean")
     labels = torch.tensor(oof_df[TARGETS].values.astype('float32'))
-    preds = softmax(torch.tensor(oof_df[TARGETS_PRED].values.astype('float32')))
-    preds = torch.log(preds)
+    preds = F.log_softmax(
+        torch.tensor(oof_df[TARGETS_PRED].values.astype('float32'))
+    )
     kl_torch = kl_loss(preds, labels).item()
 
     return kl_torch
@@ -264,6 +264,8 @@ class HMSPredictor:
             return CustomEfficientNET(self.model_config, num_classes=6, pretrained=pretrained)
         elif "vit" in backbone:
             return CustomVITMAE(self.model_config, num_classes=6, pretrained=pretrained)
+        elif "dual" in backbone:
+            return DualEncoderModel(self.model_config, num_classes=6, pretrained=pretrained)
         else:
             return None
 
@@ -365,8 +367,8 @@ class HMSPredictor:
             self.log_validation_info(fold, valid_folds, tik)
             self._plot_loss(loss_history_2, stage="2")
 
-        oof_stage_1.to_csv(os.path.join(self.output_dir, f"{self.model_name}_oof_1.csv"), index=False)
-        oof_stage_2.to_csv(os.path.join(self.output_dir, f"{self.model_name}_oof_2.csv"), index=False)
+            oof_stage_1.to_csv(os.path.join(self.output_dir, f"{self.model_name}_oof_1.csv"), index=False)
+            oof_stage_2.to_csv(os.path.join(self.output_dir, f"{self.model_name}_oof_2.csv"), index=False)
 
         info = f"{'=' * 100}\nTraining Complete!\n"
         for i, oof_df in enumerate([oof_stage_1, oof_stage_2]):
