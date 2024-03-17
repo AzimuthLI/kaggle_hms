@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import os, gc
 from time import time, ctime
+import warnings
 
 from scipy.special import rel_entr, softmax
 from sklearn.model_selection import GroupKFold, KFold
@@ -187,7 +188,7 @@ class Trainer:
 
         start = time()
         pbar = tqdm(dataloader, total=len(dataloader), unit="batch", desc=f"{mode} [{epoch_id}]")
-        for step, (X, y) in enumerate(pbar):
+        for step, (X, y, row) in enumerate(pbar):
             X, y = X.to(self.device), y.to(self.device)
 
             if is_train:
@@ -204,19 +205,20 @@ class Trainer:
                     self.optimizer.zero_grad()
                     self.scheduler.step()
             else:
-                with torch.no_grad(), autocast(enabled=self.config.AMP):
+                with torch.no_grad():
                     y_pred = self.model(X)
                     loss = self.criterion(F.log_softmax(y_pred, dim=1), y)
                 if self.config.GRADIENT_ACCUMULATION_STEPS > 1:
                     loss = loss / self.config.GRADIENT_ACCUMULATION_STEPS
+                
                 predicts_record.append(y_pred.to('cpu').numpy())
-
+            
             loss_meter.update(loss.item(), y.size(0))
             end = time()
 
             if (step % self.config.PRINT_FREQ == 0) or (step == (len_loader - 1)):
                 lr = self.scheduler.get_last_lr()[0]
-                info = f"Epoch {epoch_id + 1} [{step}/{len_loader}] | {mode} Loss: {loss_meter.val:.4f}"
+                info = f"Epoch {epoch_id + 1} [{step}/{len_loader}] | {mode} Loss: {loss_meter.avg:.4f}"
                 if is_train:
                     info += f" Grad: {grad_norm:.4f} LR: {lr:.4e}"
                 info += f" | Elapse: {end - start:.2f}s"
@@ -224,7 +226,7 @@ class Trainer:
 
         if not is_train:
             predicts_record = np.concatenate(predicts_record)
-
+            
         return loss_meter.avg, predicts_record
 
 
@@ -235,7 +237,8 @@ def evaluate_oof(oof_df):
     kl_loss = nn.KLDivLoss(reduction="batchmean")
     labels = torch.tensor(oof_df[TARGETS].values.astype('float32'))
     preds = F.log_softmax(
-        torch.tensor(oof_df[TARGETS_PRED].values.astype('float32'))
+        torch.tensor(oof_df[TARGETS_PRED].values.astype('float32'), requires_grad=False),
+        dim=1
     )
     kl_torch = kl_loss(preds, labels).item()
 
@@ -328,14 +331,24 @@ class HMSPredictor:
             tik = time()
 
             train_folds_easy = train_easy[train_easy['fold'] != fold].reset_index(drop=True)
+            train_folds_easy['train_label'] = 1
             valid_folds_easy = train_easy[train_easy['fold'] == fold].reset_index(drop=True)
             valid_folds_easy['easy_or_hard'] = "easy"
 
             train_folds_hard = train_hard[train_hard['fold'] != fold].reset_index(drop=True)
+            train_folds_hard['train_label'] = 1
             valid_folds_hard = train_hard[train_hard['fold'] == fold].reset_index(drop=True)
             valid_folds_hard['easy_or_hard'] = "hard"
             
             valid_folds = pd.concat([valid_folds_easy, valid_folds_hard], axis=0).reset_index(drop=True)
+
+            valid_folds = valid_folds.merge(train_folds_easy[['eeg_id', 'train_label']], on='eeg_id', how='left')
+            valid_folds = valid_folds[valid_folds['train_label'] != 1].reset_index(drop=True)
+            valid_folds.drop('train_label', axis=1, inplace=True)
+
+            valid_folds = valid_folds.merge(train_folds_hard[['eeg_id', 'train_label']], on='eeg_id', how='left')
+            valid_folds = valid_folds[valid_folds['train_label'] != 1].reset_index(drop=True)
+            valid_folds.drop('train_label', axis=1, inplace=True)
             
             # STAGE 1
             self.logger.info(f"{'=' * 100}\nFold: {fold} || Valid size {valid_folds.shape[0]} \n{'=' * 100}")

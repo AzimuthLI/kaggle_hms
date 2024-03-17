@@ -228,7 +228,7 @@ class CustomDataset(Dataset):
         return len(self.df)
         
     def __getitem__(self, index):
-        
+
         X, y = self.__data_generation(index)
 
         if self.mode == 'train' and self.config.AUGMENT:
@@ -409,14 +409,14 @@ class DualEncoderModel(nn.Module):
         super(DualEncoderModel, self).__init__()
 
         self.eeg_model = timm.create_model(
-            'tf_efficientnet_b1',
+            'tf_efficientnet_b2',
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
         )
 
         self.spec_model = timm.create_model(
-            'tf_efficientnet_b1',
+            'tf_efficientnet_b2',
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
