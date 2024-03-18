@@ -475,10 +475,12 @@ class PreTrainDataset(Dataset):
         df: pd.DataFrame,
         all_specs: Dict[str, np.ndarray],
         all_eegs: Dict[str, np.ndarray],
+        mode: str = 'train',
     ): 
         self.df = df
         self.spectrograms = all_specs
         self.eeg_spectrograms = all_eegs
+        self.mode = mode
         
     def __len__(self):
         return len(self.df)
@@ -491,7 +493,10 @@ class PreTrainDataset(Dataset):
     def __data_generation(self, index): # --> [(C=8) x (H=128) x (W=256)]
         
         row = self.df.iloc[index]
-        r = int((row['min'] + row['max']) // 4)
+        if self.mode=='test': 
+            r = 0
+        else: 
+            r = int((row['min'] + row['max']) // 4)
         
         img_list = []
         for region in range(4):
@@ -528,9 +533,9 @@ def reshape_pretrain_input(x): #<- (N, C, H, W)
     return stacked
 
 
-def generate_pretrain_features(df, all_specs, all_eegs, pretrained_path, device):
+def generate_pretrain_features(df, all_specs, all_eegs, pretrained_path, device, mode='train'):
 
-    dataset = PreTrainDataset(df, all_specs, all_eegs)
+    dataset = PreTrainDataset(df, all_specs, all_eegs, mode=mode)
     dataloader = DataLoader(dataset, batch_size=16, shuffle=False, collate_fn=reshape_pretrain_input)
 
     ft_extractor = ViTMAEForPreTraining.from_pretrained('facebook/vit-mae-base')
