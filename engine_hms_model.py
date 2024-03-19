@@ -11,7 +11,10 @@ from torchvision.transforms import v2
 import timm
 import random
 from torch.nn import functional as F
-from transformers import ViTMAEModel, ViTMAEConfig
+from transformers import ViTMAEModel, ViTMAEConfig, ViTMAEForPreTraining
+from torch.utils.data import DataLoader, Dataset
+from tqdm.notebook import tqdm
+
 
 DEFAULT_VITMAE_CONFIG = {
     "architectures": [
@@ -228,7 +231,7 @@ class CustomDataset(Dataset):
         return len(self.df)
         
     def __getitem__(self, index):
-        
+
         X, y = self.__data_generation(index)
 
         if self.mode == 'train' and self.config.AUGMENT:
@@ -409,14 +412,14 @@ class DualEncoderModel(nn.Module):
         super(DualEncoderModel, self).__init__()
 
         self.eeg_model = timm.create_model(
-            'tf_efficientnet_b1',
+            'tf_efficientnet_b0',
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
         )
 
         self.spec_model = timm.create_model(
-            'tf_efficientnet_b1',
+            'tf_efficientnet_b0',
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
@@ -462,3 +465,95 @@ class DualEncoderModel(nn.Module):
         spec_feature = self.spec_features(spec)
         x = self.custom_layers(eeg_feature + spec_feature)
         return x
+
+
+# MAE Pretraining and LightGBM functions
+class PreTrainDataset(Dataset):
+
+    def __init__(
+        self, 
+        df: pd.DataFrame,
+        all_specs: Dict[str, np.ndarray],
+        all_eegs: Dict[str, np.ndarray],
+        mode: str = 'train',
+    ): 
+        self.df = df
+        self.spectrograms = all_specs
+        self.eeg_spectrograms = all_eegs
+        self.mode = mode
+        
+    def __len__(self):
+        return len(self.df)
+        
+    def __getitem__(self, index):
+        X = self.__data_generation(index)
+        X = self.__transform(X)
+        return X
+    
+    def __data_generation(self, index): # --> [(C=8) x (H=128) x (W=256)]
+        
+        row = self.df.iloc[index]
+        if self.mode=='test': 
+            r = 0
+        else: 
+            r = int((row['min'] + row['max']) // 4)
+        
+        img_list = []
+        for region in range(4):
+            img = np.zeros((128, 256), dtype='float32')
+
+            spectrogram = self.spectrograms[row['spectrogram_id']][r:r+300, region*100:(region+1)*100].T
+            spectrogram = transform_spectrogram(spectrogram)
+            
+            img[14:-14, :] = spectrogram[:, 22:-22] / 2.0
+            img_list.append(img)
+
+        img = self.eeg_spectrograms[row['eeg_id']]
+        img_list += [img[:, :, i] for i in range(4)]
+      
+        X = np.array(img_list, dtype='float32')
+        X = torch.tensor(X, dtype=torch.float32)
+        
+        return X
+
+    def __transform(self, x):
+        # To be implemented...
+        return x 
+
+
+def reshape_pretrain_input(x): #<- (N, C, H, W)
+    x = torch.stack(x, dim=0)
+    concat_p1 = torch.cat(torch.chunk(x[:, :4, :, :], 4, dim=1), dim=2)
+    concat_p2 = torch.cat(torch.chunk(x[:, 4:, :, :], 4, dim=1), dim=2)
+    x_concat = torch.cat((concat_p1, concat_p2), dim=3)
+   
+    resized = F.interpolate(x_concat, size=(224, 224), mode='bilinear', align_corners=False)
+    stacked = resized.repeat(1, 3, 1, 1)
+    
+    return stacked
+
+
+def generate_pretrain_features(df, all_specs, all_eegs, pretrained_path, device, mode='train'):
+
+    dataset = PreTrainDataset(df, all_specs, all_eegs, mode=mode)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=False, collate_fn=reshape_pretrain_input)
+
+    ft_extractor = ViTMAEForPreTraining.from_pretrained('facebook/vit-mae-base')
+    ft_extractor.load_state_dict(torch.load(pretrained_path))
+    ft_extractor = ft_extractor.to(device)
+
+    ft_extractor.eval()
+
+    feature_collects = []
+    for x in tqdm(dataloader):
+        x = x.to(device)
+        with torch.no_grad():
+            output = ft_extractor(x, output_hidden_states=True)
+            features = output.hidden_states[-1][:, 0, :]
+            feature_collects.append(features.cpu().numpy())
+
+    feature_matrix = np.concatenate(feature_collects, axis=0)
+
+    return feature_matrix
+
+
