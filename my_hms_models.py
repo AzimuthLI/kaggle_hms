@@ -1,7 +1,7 @@
-# %% [code]
-
+import os
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from typing import List, Dict
 
 import torch
@@ -10,72 +10,95 @@ import torch.nn as nn
 from torchvision.transforms import v2
 import timm
 import random
+from torch.nn import functional as F
+from transformers import ViTMAEModel, ViTMAEConfig, ViTMAEForPreTraining
+from torch.utils.data import DataLoader, Dataset
+from tqdm.notebook import tqdm
 
-class ModelConfig:
-    NON_OVERLAP_METHOD = 'weighted' # 'weighted', 'simple'
-    GROUP_KEYS = 'eeg_id'
-    AMP = True
-    BATCH_SIZE = 16
-    EPOCHS = 6
-    FOLDS = 5
-    GRADIENT_ACCUMULATION_STEPS = 2
-    DROP_RATE = 0.15 # default: 0.1
-    DROP_PATH_RATE = 0.25 # default: 0.2
-    USE_KAGGLE_SPECTROGRAMS = True
-    USE_EEG_SPECTROGRAMS = True
-    AUGMENT = True
-    DATA_ARRANGE = 0 # 0: [512, 512, 1], 1: [256, 256, 4]
-    FREEZE = False
-    MAX_GRAD_NORM = 1e7
-    MODEL = "tf_efficientnet_b2" #"tf_efficientnet_b0"
-    MODEL_POSTFIX = "h_flip" # "flat"
-    NUM_FROZEN_LAYERS = 39
-    NUM_WORKERS = 0 # multiprocessing.cpu_count()
-    PRINT_FREQ = 50
-    SEED = 20
-    TRAIN_FULL_DATA = False
-    VISUALIZE = True
-    WEIGHT_DECAY = 0.01
-    
+
+DEFAULT_VITMAE_CONFIG = {
+    "architectures": [
+        "ViTMAEForPreTraining"
+    ],
+    "attention_probs_dropout_prob": 0.0,
+    "decoder_hidden_size": 512,
+    "decoder_intermediate_size": 2048,
+    "decoder_num_attention_heads": 16,
+    "decoder_num_hidden_layers": 8,
+    "hidden_act": "gelu",
+    "hidden_dropout_prob": 0.0,
+    "hidden_size": 768,
+    "image_size": 224,
+    "initializer_range": 0.02,
+    "intermediate_size": 3072,
+    "layer_norm_eps": 1e-12,
+    "mask_ratio": 0.75,
+    "model_type": "vit_mae",
+    "norm_pix_loss": False,
+    "num_attention_heads": 12,
+    "num_channels": 3,
+    "num_hidden_layers": 12,
+    "patch_size": 16,
+    "qkv_bias": True,
+    "torch_dtype": "float32",
+    "transformers_version": "4.16.0.dev0"
+    }
+
+
 class KagglePaths:
     OUTPUT_DIR = "/kaggle/working/"
     PRE_LOADED_EEGS = '/kaggle/input/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTOGRAMS = '/kaggle/input/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTROGRAMS = '/kaggle/input/brain-spectrograms/specs.npy'
     TRAIN_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/train.csv"
-    TRAIN_EEGS = "/kaggle/input/brain-eeg-spectrograms/EEG_Spectrograms/"
-    TRAIN_SPECTOGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/train_spectrograms/"
+    TRAIN_EEGS = "/kaggle/input/hms-harmful-brain-activity-classification/train_eegs/"
+    TRAIN_SPECTROGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/train_spectrograms/"
     TEST_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/test.csv"
     TEST_SPECTROGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/test_spectrograms/"
     TEST_EEGS = "/kaggle/input/hms-harmful-brain-activity-classification/test_eegs/"
 
+
 class LocalPaths:
     OUTPUT_DIR = "./outputs/"
     PRE_LOADED_EEGS = './inputs/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTOGRAMS = './inputs/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTROGRAMS = './inputs/brain-spectrograms/specs.npy'
     TRAIN_CSV = "./inputs/hms-harmful-brain-activity-classification/train.csv"
-    TRAIN_EEGS = " ./inputs/hms-harmful-brain-activity-classification/train_eegs"
-    TRAIN_SPECTOGRAMS = "./inputs/hms-harmful-brain-activity-classification/train_spectrograms"
+    TRAIN_EEGS = "./inputs/hms-harmful-brain-activity-classification/train_eegs"
+    TRAIN_SPECTROGRAMS = "./inputs/hms-harmful-brain-activity-classification/train_spectrograms"
     TEST_CSV = "./inputs/hms-harmful-brain-activity-classification/test.csv"
     TEST_SPECTROGRAMS = "./inputs/hms-harmful-brain-activity-classification/test_spectrograms"
     TEST_EEGS = "./inputs/hms-harmful-brain-activity-classification/test_eegs"
 
 
-def transform_spectrogram(spectrogram):
+class ModelConfig:
+    SEED = 20
+    SPLIT_ENTROPY = 5.5
+    MODEL_NAME = "EfficientNet_b2_two_stage"
+    MODEL_BACKBONE = "tf_efficientnet_b2"
+    BATCH_SIZE = 16
+    EPOCHS = 6
+    GRADIENT_ACCUMULATION_STEPS = 2
+    DROP_RATE = 0.15 # default: 0.1
+    DROP_PATH_RATE = 0.25 # default: 0.2
+    WEIGHT_DECAY = 0.01
+    REGULARIZATION = None
+    DROP_RATE = 0.15 # default: 0.1
+    DROP_PATH_RATE = 0.25 # default: 0.2
+    USE_KAGGLE_SPECTROGRAMS = True
+    USE_EEG_SPECTROGRAMS = True
+    AMP = True
+    AUGMENT = False
+    AUGMENTATIONS = ['h_flip', 'v_flip', 'xy_masking', 'cutmix']
+    PRINT_FREQ = 50
+    FREEZE = False
+    NUM_FROZEN_LAYERS = 0
+    NUM_WORKERS = 0 
+    MAX_GRAD_NORM = 1e7
+    MAE_PRETRAINED_WEIGHTS = 'facebook/vit-mae-base'
+    MAE_HIDDEN_DROPOUT_PROB = 0.05
+    MAE_ATTENTION_DROPOUT_PROB = 0.05
 
-    # Log transform spectogram
-    spectrogram = np.clip(spectrogram, np.exp(-4), np.exp(8))
-    spectrogram = np.log(spectrogram)
 
-    # Standarize per image
-    ep = 1e-6
-    mu = np.nanmean(spectrogram.flatten())
-    std = np.nanstd(spectrogram.flatten())
-    spectrogram = (spectrogram-mu) / (std+ep)
-    spectrogram = np.nan_to_num(spectrogram, nan=0.0)
-        
-    return spectrogram
-
-
+# AUGMENTATIONS
 class MyXYMasking(nn.Module):
 
     def __init__(self, mask_ratio=0.1, max_mask_num=2, p=0.5):
@@ -166,18 +189,20 @@ class MyCutMix(nn.Module):
             return X, y
 
 
+def transform_spectrogram(spectrogram):
 
-# Define the augmentations
-augment_applier = v2.RandomApply(
-    transforms=[
-        v2.RandomHorizontalFlip(p=1), 
-        # v2.RandomVerticalFlip(p=1),
-        # MyXYMasking(mask_ratio=0.1, max_mask_num=1, p=1),
-        ], 
-        p=.5)
+    # Log transform spectogram
+    spectrogram = np.clip(spectrogram, np.exp(-4), np.exp(8))
+    spectrogram = np.log(spectrogram)
 
-# maximum cut: 20% of the width
-cutmix_applier = MyCutMix(cut_ratio=0.2, bound_pad=20, p=.5)
+    # Standarize per image
+    ep = 1e-6
+    mu = np.nanmean(spectrogram.flatten())
+    std = np.nanstd(spectrogram.flatten())
+    spectrogram = (spectrogram-mu) / (std+ep)
+    spectrogram = np.nan_to_num(spectrogram, nan=0.0)
+        
+    return spectrogram
 
 
 class CustomDataset(Dataset):
@@ -189,7 +214,6 @@ class CustomDataset(Dataset):
         config,
         all_specs: Dict[str, np.ndarray],
         all_eegs: Dict[str, np.ndarray],
-        augment: bool = False,
         mode: str = 'train',
     ): 
         self.df = df
@@ -199,30 +223,24 @@ class CustomDataset(Dataset):
         self.mode = mode
         self.spectrograms = all_specs
         self.eeg_spectrograms = all_eegs
-        self.augment = augment
-        self.data_arrange = config.DATA_ARRANGE
+
+        if self.config.AUGMENT:
+            self.augment_applier, self.cutmix_applier = self.__get_augment_applier()
         
     def __len__(self):
-        """
-        Denotes the number of batches per epoch.
-        """
         return len(self.df)
         
     def __getitem__(self, index):
-        """
-        Generate one batch of data.
-        """
+
         X, y = self.__data_generation(index)
 
-        if self.mode == 'train' and self.augment:
+        if self.mode == 'train' and self.config.AUGMENT:
             X, y = self.__transform(X, y)
         
         return X, y
-                        
-    def __data_generation(self, index):
-        """
-        Generates data containing batch_size samples.
-        """
+    
+    def __data_generation(self, index): # --> [(C=8) x (H=128) x (W=256)]
+        
         row = self.df.iloc[index]
         if self.mode=='test': 
             r = 0
@@ -230,7 +248,257 @@ class CustomDataset(Dataset):
             r = int((row['min'] + row['max']) // 4)
         
         img_list = []
+        if self.config.USE_KAGGLE_SPECTROGRAMS:
+            for region in range(4):
+                img = np.zeros((128, 256), dtype='float32')
 
+                spectrogram = self.spectrograms[row['spectrogram_id']][r:r+300, region*100:(region+1)*100].T
+                spectrogram = transform_spectrogram(spectrogram)
+                
+                img[14:-14, :] = spectrogram[:, 22:-22] / 2.0
+                img_list.append(img)
+
+        if self.config.USE_EEG_SPECTROGRAMS:
+            img = self.eeg_spectrograms[row['eeg_id']]
+            img_list += [img[:, :, i] for i in range(4)]
+      
+        X = np.array(img_list, dtype='float32')
+        X = torch.tensor(X, dtype=torch.float32)
+                
+        if (self.mode == 'train') or (self.mode == 'valid'):
+            y = row[self.label_cols].values.astype(np.float32)
+        elif self.mode == 'test':
+            y = np.zeros(len(self.label_cols), dtype=np.float32)
+        else:
+            raise ValueError(f"Invalid mode {self.mode}!")
+        
+        y = torch.tensor(y, dtype=torch.float32)
+        
+        return X, y
+    
+    def __get_augment_applier(self):
+
+        aug_list = []
+        
+        if 'h_flip' in self.config.AUGMENTATIONS:
+            aug_list.append(v2.RandomHorizontalFlip(p=1))
+        if 'v_flip' in self.config.AUGMENTATIONS:
+            aug_list.append(v2.RandomVerticalFlip(p=1))
+        if 'xy_masking' in self.config.AUGMENTATIONS:
+            aug_list.append(MyXYMasking(mask_ratio=0.1, max_mask_num=1, p=1))
+
+        if len(aug_list) > 0:
+            augment_applier = v2.RandomApply(transforms=aug_list, p=.5)
+        else:
+            augment_applier = None
+
+        cutmix_applier = None
+        if 'cutmix' in self.config.AUGMENTATIONS:
+            cutmix_applier = MyCutMix(cut_ratio=0.2, bound_pad=20, p=1)
+        
+        return augment_applier, cutmix_applier
+
+    def __transform(self, x, y):
+
+        if random.choice([True, False]):
+            if self.augment_applier is not None:
+                x = self.augment_applier(x)
+        else:
+            if self.cutmix_applier is not None:
+                sample_class = self.label_cols[torch.argmax(y).item()]
+                same_class_samples = self.df[self.df[self.label_cols].idxmax(axis=1) == sample_class]
+                # Skip if less than 2 samples with the same class label
+                if len(same_class_samples) > 2:
+                    selected_idx = random.choice(same_class_samples.index)
+                    cut_img, cut_target = self.__data_generation(selected_idx)
+                    x, y = self.cutmix_applier(x, y, cut_img, cut_target)
+
+        return x, y
+
+
+class CustomEfficientNET(nn.Module):
+
+    def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
+        super(CustomEfficientNET, self).__init__()
+        
+        self.config = config
+
+        self.model = timm.create_model(
+            config.MODEL_BACKBONE,
+            pretrained=pretrained,
+            drop_rate = config.DROP_RATE,
+            drop_path_rate = config.DROP_PATH_RATE,
+        )
+
+        self.features = nn.Sequential(*list(self.model.children())[:-2])
+        
+        self.custom_layers = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(self.model.num_features, num_classes)
+        )
+    
+    def __reshape_input(self, x): # <- [(C=8) x (H=128) x (W=256)]
+        
+        if self.config.USE_KAGGLE_SPECTROGRAMS:
+            kgg_specs = torch.cat([x[:, i:i+1, :, :] for i in range(0, 4)], dim=2)
+            
+        if self.config.USE_EEG_SPECTROGRAMS:
+            eeg_specs = torch.cat([x[:, i:i+1, :, :] for i in range(4, 8)], dim=2)
+            
+        if self.config.USE_KAGGLE_SPECTROGRAMS and self.config.USE_EEG_SPECTROGRAMS:
+            x = torch.cat([kgg_specs, eeg_specs], dim=3)
+        else:
+            x = kgg_specs if self.config.USE_KAGGLE_SPECTROGRAMS else eeg_specs
+
+        x = torch.cat([x, x, x], dim=1)
+        
+        return x # ->[(C=3) x (H=512) x (W=512)]
+    
+    def forward(self, x):
+        x = self.__reshape_input(x)
+        x = self.features(x)
+        x = self.custom_layers(x)
+        return x
+
+
+class CustomVITMAE(nn.Module):
+    def __init__(self, config, num_classes=6, pretrained=None):
+        super(CustomVITMAE, self).__init__()
+
+        # Load the ViTMAE configuration and model as before
+        mae_config = ViTMAEConfig.from_dict(DEFAULT_VITMAE_CONFIG)
+        mae_config.hidden_dropout_prob = config.MAE_HIDDEN_DROPOUT_PROB
+        mae_config.attention_probs_dropout_prob = config.MAE_ATTENTION_DROPOUT_PROB
+
+        if pretrained:
+            self.vitmae = ViTMAEModel.from_pretrained(
+                config.MAE_PRETRAINED_WEIGHTS, config=mae_config)
+        else:
+            self.vitmae = ViTMAEModel(config=mae_config)
+
+        # Assumes the [CLS] token (or equivalent) is at position 0 
+        # and directly usable for classification
+        # self.classifier = nn.Linear(self.vitmae.config.hidden_size, num_classes)
+        self.classifier = nn.Sequential(
+            nn.Linear(self.vitmae.config.hidden_size, 512),
+            nn.GELU(),
+            nn.Dropout(config.DROP_RATE),
+            nn.Linear(512, num_classes)
+        )
+
+    def __reshape_input(self, x): # <- (N, C=8, H=128, W=256)
+
+        concat_p1 = torch.cat(torch.chunk(x[:, :4, :, :], 4, dim=1), dim=2)
+        concat_p2 = torch.cat(torch.chunk(x[:, 4:, :, :], 4, dim=1), dim=2)
+        x_concat = torch.cat((concat_p1, concat_p2), dim=3)
+       
+        resized = F.interpolate(x_concat, size=(224, 224), mode='bilinear', align_corners=False)
+        stacked = resized.repeat(1, 3, 1, 1)
+        
+        return stacked #-> (N, C=3, H=224, W=224)
+    
+    def forward(self, x):
+        x = self.__reshape_input(x)
+        outputs = self.vitmae(pixel_values=x)
+        sequence_output = outputs.last_hidden_state
+        logits = self.classifier(sequence_output[:, 0, :])
+
+        return logits
+    
+
+class DualEncoderModel(nn.Module):
+    def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
+        super(DualEncoderModel, self).__init__()
+
+        self.eeg_model = timm.create_model(
+            'tf_efficientnet_b2',
+            pretrained=pretrained,
+            drop_rate = 0.1,
+            drop_path_rate = 0.2,
+        )
+
+        self.spec_model = timm.create_model(
+            'tf_efficientnet_b2',
+            pretrained=pretrained,
+            drop_rate = 0.1,
+            drop_path_rate = 0.2,
+        )
+        
+        if config.FREEZE:
+            for i,(name, param) in enumerate(list(self.model.named_parameters())\
+                                            [0:config.NUM_FROZEN_LAYERS]):
+                param.requires_grad = False
+
+        self.eeg_features = nn.Sequential(*list(self.eeg_model.children())[:-2])
+        self.spec_features = nn.Sequential(*list(self.spec_model.children())[:-2])
+        self.custom_layers = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(self.eeg_model.num_features, num_classes)
+        )
+
+    def __reshape_input(self, x):
+        # # raw implementation
+        # # input size: [batch * 128 * 256 * 8]
+        # ## --> 256*512*3 for 2 parts
+        # spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
+        # eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
+        # spec = torch.cat([spectograms, spectograms, spectograms], dim=3)
+        # spec = spec.permute(0, 3, 1, 2)
+        # eeg = torch.cat([eegs, eegs, eegs], dim=3)
+        # eeg = eeg.permute(0, 3, 1, 2)
+
+        # new implementation
+        # input size: [N, C=8, H=128, W=256]
+        specs = torch.cat([x[:, i:i+1, :, :] for i in range(4)], dim=2) #-> [N, 1, 512, 256]
+        specs = torch.cat([specs]*3, dim=1) #-> [N, 3, 512, 256]
+
+        eegs = torch.cat([x[:, i:i+1, :, :] for i in range(4, 8)], dim=2) #-> [N, 1, 512, 256]
+        eegs = torch.cat([eegs]*3, dim=1) #-> [N, 3, 512, 256]
+        
+        return eegs, specs
+    
+    def forward(self, x):
+        eeg, spec = self.__reshape_input(x)
+        eeg_feature = self.eeg_features(eeg)
+        spec_feature = self.spec_features(spec)
+        x = self.custom_layers(eeg_feature + spec_feature)
+        return x
+
+
+# MAE Pretraining and LightGBM functions
+class PreTrainDataset(Dataset):
+
+    def __init__(
+        self, 
+        df: pd.DataFrame,
+        all_specs: Dict[str, np.ndarray],
+        all_eegs: Dict[str, np.ndarray],
+        mode: str = 'train',
+    ): 
+        self.df = df
+        self.spectrograms = all_specs
+        self.eeg_spectrograms = all_eegs
+        self.mode = mode
+        
+    def __len__(self):
+        return len(self.df)
+        
+    def __getitem__(self, index):
+        X = self.__data_generation(index)
+        X = self.__transform(X)
+        return X
+    
+    def __data_generation(self, index): # --> [(C=8) x (H=128) x (W=256)]
+        
+        row = self.df.iloc[index]
+        if self.mode=='test': 
+            r = 0
+        else: 
+            r = int((row['min'] + row['max']) // 4)
+        
+        img_list = []
         for region in range(4):
             img = np.zeros((128, 256), dtype='float32')
 
@@ -242,86 +510,50 @@ class CustomDataset(Dataset):
 
         img = self.eeg_spectrograms[row['eeg_id']]
         img_list += [img[:, :, i] for i in range(4)]
-
-        X = np.stack(img_list, axis=2)
-                
-        if self.mode == 'train':
-            y = row[self.label_cols].values.astype(np.float32)
-        elif self.mode == 'test':
-            y = np.zeros(len(self.label_cols), dtype=np.float32)
-
+      
+        X = np.array(img_list, dtype='float32')
         X = torch.tensor(X, dtype=torch.float32)
-        X = X.permute(2, 0, 1)
-
-        y = torch.tensor(y, dtype=torch.float32)
         
-        return X, y
+        return X
 
-    def __transform(self, x, y):
-
-        if True: #random.choice([True, False]):
-            x = augment_applier(x)
-        else:
-            
-            sample_class = self.label_cols[torch.argmax(y).item()]
-            same_class_samples = self.df[self.df[self.label_cols].idxmax(axis=1) == sample_class]
-
-            # Skip if less than 2 samples with coconfidence score 1.0
-            if len(same_class_samples) > 2:
-
-                selected_idx = random.choice(same_class_samples.index)
-                cut_img, cut_target = self.__data_generation(selected_idx)
-
-                x, y = cutmix_applier(x, y, cut_img, cut_target)
-
-        return x, y
+    def __transform(self, x):
+        # To be implemented...
+        return x 
 
 
-class CustomModel(nn.Module):
-
-    def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
-        super(CustomModel, self).__init__()
-
-        self.model = timm.create_model(
-            config.MODEL,
-            pretrained=pretrained,
-            drop_rate = config.DROP_RATE,
-            drop_path_rate = config.DROP_PATH_RATE,
-        )
-        
-        if config.FREEZE:
-            for i,(name, param) in enumerate(list(self.model.named_parameters())\
-                                             [0:config.NUM_FROZEN_LAYERS]):
-                param.requires_grad = False
-
-        self.features = nn.Sequential(*list(self.model.children())[:-2])
-        
-        self.custom_layers = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(self.model.num_features, num_classes)
-        )
+def reshape_pretrain_input(x): #<- (N, C, H, W)
+    x = torch.stack(x, dim=0)
+    concat_p1 = torch.cat(torch.chunk(x[:, :4, :, :], 4, dim=1), dim=2)
+    concat_p2 = torch.cat(torch.chunk(x[:, 4:, :, :], 4, dim=1), dim=2)
+    x_concat = torch.cat((concat_p1, concat_p2), dim=3)
+   
+    resized = F.interpolate(x_concat, size=(224, 224), mode='bilinear', align_corners=False)
+    stacked = resized.repeat(1, 3, 1, 1)
     
-    def __reshape_input(self, x):
-        # # input size: [batch * 128 * 256 * 8]
-        # spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
-        # eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
-        # x = torch.cat([spectograms, eegs], dim=2)
-        # x = torch.cat([x, x, x], dim=3)
-        # x = x.permute(0, 3, 1, 2)
+    return stacked
 
-        # input size: [batch * 8 * 128 * 256]
-        kgg_specs = torch.cat([x[:, i:i+1, :, :] for i in range(0, 4)], dim=2)
-        eeg_specs = torch.cat([x[:, i:i+1, :, :] for i in range(4, 8)], dim=2)
 
-        x = torch.cat([kgg_specs, eeg_specs], dim=3)
-        x = torch.cat([x, x, x], dim=1)
-        
-        # output size: [batch * 3 * 512 * 512]
-        return x
+def generate_pretrain_features(df, all_specs, all_eegs, pretrained_path, device, mode='train'):
+
+    dataset = PreTrainDataset(df, all_specs, all_eegs, mode=mode)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=False, collate_fn=reshape_pretrain_input)
     
-    def forward(self, x):
-        x = self.__reshape_input(x)
-        x = self.features(x)
-        x = self.custom_layers(x)
-        return x
+    mae_config = ViTMAEConfig.from_dict(DEFAULT_VITMAE_CONFIG)
+    ft_extractor = ViTMAEForPreTraining.from_pretrained(pretrained_path, config=mae_config)
+    ft_extractor = ft_extractor.to(device)
+
+    ft_extractor.eval()
+
+    feature_collects = []
+    for x in tqdm(dataloader):
+        x = x.to(device)
+        with torch.no_grad():
+            output = ft_extractor(x, output_hidden_states=True)
+            features = output.hidden_states[-1][:, 0, :]
+            feature_collects.append(features.cpu().numpy())
+
+    feature_matrix = np.concatenate(feature_collects, axis=0)
+
+    return feature_matrix
+
+
