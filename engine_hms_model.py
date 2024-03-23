@@ -48,10 +48,10 @@ DEFAULT_VITMAE_CONFIG = {
 class KagglePaths:
     OUTPUT_DIR = "/kaggle/working/"
     PRE_LOADED_EEGS = '/kaggle/input/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTOGRAMS = '/kaggle/input/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTROGRAMS = '/kaggle/input/brain-spectrograms/specs.npy'
     TRAIN_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/train.csv"
-    TRAIN_EEGS = "/kaggle/input/brain-eeg-spectrograms/EEG_Spectrograms/"
-    TRAIN_SPECTOGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/train_spectrograms/"
+    TRAIN_EEGS = "/kaggle/input/hms-harmful-brain-activity-classification/train_eegs/"
+    TRAIN_SPECTROGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/train_spectrograms/"
     TEST_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/test.csv"
     TEST_SPECTROGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/test_spectrograms/"
     TEST_EEGS = "/kaggle/input/hms-harmful-brain-activity-classification/test_eegs/"
@@ -60,7 +60,7 @@ class KagglePaths:
 class LocalPaths:
     OUTPUT_DIR = "./outputs/"
     PRE_LOADED_EEGS = './inputs/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTOGRAMS = './inputs/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTROGRAMS = './inputs/brain-spectrograms/specs.npy'
     TRAIN_CSV = "./inputs/hms-harmful-brain-activity-classification/train.csv"
     TRAIN_EEGS = "./inputs/hms-harmful-brain-activity-classification/train_eegs"
     TRAIN_SPECTROGRAMS = "./inputs/hms-harmful-brain-activity-classification/train_spectrograms"
@@ -93,6 +93,7 @@ class ModelConfig:
     NUM_FROZEN_LAYERS = 0
     NUM_WORKERS = 0 
     MAX_GRAD_NORM = 1e7
+    DUAL_ENCODER_BACKBONE = 'tf_efficientnet_b2'
     MAE_PRETRAINED_WEIGHTS = 'facebook/vit-mae-base'
     MAE_HIDDEN_DROPOUT_PROB = 0.05
     MAE_ATTENTION_DROPOUT_PROB = 0.05
@@ -411,15 +412,17 @@ class DualEncoderModel(nn.Module):
     def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
         super(DualEncoderModel, self).__init__()
 
+        backbone = config.DUAL_ENCODER_BACKBONE
+
         self.eeg_model = timm.create_model(
-            'tf_efficientnet_b0',
+            backbone,
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
         )
 
         self.spec_model = timm.create_model(
-            'tf_efficientnet_b0',
+            backbone,
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
@@ -538,8 +541,9 @@ def generate_pretrain_features(df, all_specs, all_eegs, pretrained_path, device,
     dataset = PreTrainDataset(df, all_specs, all_eegs, mode=mode)
     dataloader = DataLoader(dataset, batch_size=16, shuffle=False, collate_fn=reshape_pretrain_input)
 
-    ft_extractor = ViTMAEForPreTraining.from_pretrained('facebook/vit-mae-base')
-    ft_extractor.load_state_dict(torch.load(pretrained_path))
+    mae_config = ViTMAEConfig.from_dict(DEFAULT_VITMAE_CONFIG)
+
+    ft_extractor = ViTMAEForPreTraining.from_pretrained(pretrained_path, config=mae_config)
     ft_extractor = ft_extractor.to(device)
 
     ft_extractor.eval()

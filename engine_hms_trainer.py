@@ -70,7 +70,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def cal_entropy(row, tgt_list):
+def calc_entropy(row, tgt_list):
     nc = len(tgt_list)
     uniform_list = [1 / nc for i in range(nc)]
     return sum(rel_entr(uniform_list, row[tgt_list].astype('float32').values + 1e-5))
@@ -107,7 +107,7 @@ def load_kaggle_data(train_csv, preload_specs, preload_eegs, split_entropy=5.5):
     train_csv = pd.read_csv(train_csv)
     targets = train_csv.columns[-6:]
 
-    train_csv['entropy'] = train_csv.apply(cal_entropy, axis=1, tgt_list=targets)
+    train_csv['entropy'] = train_csv.apply(calc_entropy, axis=1, tgt_list=targets)
     train_csv['total_votes'] = train_csv[targets].sum(axis=1)
 
     easy_csv = train_csv[train_csv['entropy'] >= split_entropy].copy().reset_index(drop=True)
@@ -188,7 +188,7 @@ class Trainer:
 
         start = time()
         pbar = tqdm(dataloader, total=len(dataloader), unit="batch", desc=f"{mode} [{epoch_id}]")
-        for step, (X, y, row) in enumerate(pbar):
+        for step, (X, y) in enumerate(pbar):
             X, y = X.to(self.device), y.to(self.device)
 
             if is_train:
