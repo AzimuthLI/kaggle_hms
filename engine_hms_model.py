@@ -373,6 +373,7 @@ class CustomVITMAE(nn.Module):
         mae_config.attention_probs_dropout_prob = config.MAE_ATTENTION_DROPOUT_PROB
 
         if pretrained:
+            print(f"Loading pretrained weights from {config.MAE_PRETRAINED_WEIGHTS}")
             self.vitmae = ViTMAEModel.from_pretrained(
                 config.MAE_PRETRAINED_WEIGHTS, config=mae_config)
         else:
