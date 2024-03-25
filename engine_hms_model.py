@@ -362,6 +362,40 @@ class CustomEfficientNET(nn.Module):
         x = self.custom_layers(x)
         return x
 
+class SeqPool(nn.Module):
+    def __init__(self, emb_dim):
+        super().__init__()
+        self.dense = nn.Linear(emb_dim, 1)  # Dense layer to compute attention scores
+        self.softmax = nn.Softmax(dim=-1)   # Softmax to normalize scores
+
+    def forward(self, x):
+        # x shape: [batch_size, seq_len, emb_dim]
+        bs, seq_len, emb_dim = x.shape
+        identity = x
+
+        # Compute attention scores using a dense layer
+        # After dense layer, scores shape: [batch_size, seq_len, 1]
+        scores = self.dense(x)
+
+        # Normalize scores using softmax to get attention weights
+        # We permute to get the correct dimension for softmax
+        # Softmax is applied across the seq_len dimension
+        scores = scores.squeeze(-1).softmax(dim=-1)
+
+        # Before matrix multiplication, add an extra dimension to scores
+        # to match the dimensions for matmul: [batch_size, 1, seq_len]
+        scores = scores.unsqueeze(1)
+
+        # Perform weighted sum of sequence embeddings using attention weights
+        # Matrix multiplication: [batch_size, 1, seq_len] @ [batch_size, seq_len, emb_dim]
+        # Results in pooled output shape: [batch_size, 1, emb_dim]
+        pooled_output = torch.matmul(scores, identity)
+
+        # Remove the extra dimension to match the embedding dimension
+        # Final shape: [batch_size, emb_dim]
+        pooled_output = pooled_output.squeeze(1)
+
+        return pooled_output
 
 class CustomVITMAE(nn.Module):
     def __init__(self, config, num_classes=6, pretrained=None):
@@ -379,15 +413,16 @@ class CustomVITMAE(nn.Module):
         else:
             self.vitmae = ViTMAEModel(config=mae_config)
 
+        self.seq_pool = SeqPool(emb_dim=self.vitmae.config.hidden_size)
         # Assumes the [CLS] token (or equivalent) is at position 0 
         # and directly usable for classification
-        # self.classifier = nn.Linear(self.vitmae.config.hidden_size, num_classes)
-        self.classifier = nn.Sequential(
-            nn.Linear(self.vitmae.config.hidden_size, 512),
-            nn.GELU(),
-            nn.Dropout(config.DROP_RATE),
-            nn.Linear(512, num_classes)
-        )
+        self.classifier = nn.Linear(self.vitmae.config.hidden_size, num_classes)
+        # self.classifier = nn.Sequential(
+        #     nn.Linear(self.vitmae.config.hidden_size, 512),
+        #     nn.GELU(),
+        #     nn.Dropout(config.DROP_RATE),
+        #     nn.Linear(512, num_classes)
+        # )
 
     def __reshape_input(self, x): # <- (N, C=8, H=128, W=256)
 
@@ -404,7 +439,9 @@ class CustomVITMAE(nn.Module):
         x = self.__reshape_input(x)
         outputs = self.vitmae(pixel_values=x)
         sequence_output = outputs.last_hidden_state
-        logits = self.classifier(sequence_output[:, 0, :])
+        # Apply SeqPool to the sequence of patch embeddings
+        pooled_output = self.seq_pool(sequence_output)
+        logits = self.classifier(pooled_output)
 
         return logits
     
