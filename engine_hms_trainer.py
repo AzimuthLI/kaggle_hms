@@ -90,14 +90,21 @@ def gen_non_overlap_samples(df_csv, targets):
         'expert_consensus': 'first'
     }
 
-    groupby = df_csv.groupby(['eeg_id'] + tgt_list)
+    for tgt in tgt_list:
+        agg_dict[tgt] = 'sum'
+
+    # groupby = df_csv.groupby(['eeg_id'] + tgt_list)
+    groupby = df_csv.groupby(['eeg_id'])
     train = groupby.agg(agg_dict)
     train = train.reset_index()
-    train.columns = ['_'.join(col).strip() for col in train.columns.values]
-    train.columns = ["eeg_id"] + tgt_list + ['spectrogram_id', 'min', 'max', 'patient_id', 'target']
+    # train.columns = ['_'.join(col).strip() for col in train.columns.values]
+    # train.columns = ["eeg_id"] + tgt_list + ['spectrogram_id', 'min', 'max', 'patient_id', 'target']
+    train.columns = ['eeg_id', 'spectrogram_id', 'min', 'max', 'patient_id', 'target'] + tgt_list
+    train['total_votes'] = train[tgt_list].sum(axis=1)
+    train[tgt_list] = train[tgt_list].apply(lambda x: x / x.sum(), axis=1)
     
-    vote_sum = train[tgt_list]
-    train[tgt_list] = vote_sum.div(vote_sum.sum(axis=1), axis=0)
+    # vote_sum = train[tgt_list]
+    # train[tgt_list] = vote_sum.div(vote_sum.sum(axis=1), axis=0)
     
     return train
 
@@ -129,6 +136,9 @@ class Trainer:
         self.model = model
         self.logger = logger
         self.config = config
+        
+        self.early_stop_rounds = config.EARLY_STOP_ROUNDS
+        self.early_stop_counter = 0
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.criterion = nn.KLDivLoss(reduction="batchmean")
@@ -174,6 +184,13 @@ class Trainer:
                 best_weights = self.model.state_dict()
                 best_preds = valid_preds
                 self.logger.info(f"Best model found in epoch {epoch + 1} | valid loss: {best_loss:.4f}")
+                self.early_stop_counter = 0
+            
+            else:
+                self.early_stop_counter += 1
+                if self.early_stop_counter >= self.early_stop_rounds:
+                    self.logger.info(f"Early stopping at epoch {epoch + 1}")
+                    break
 
         return best_weights, best_preds, loss_records
 

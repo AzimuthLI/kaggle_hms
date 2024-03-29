@@ -81,8 +81,6 @@ class ModelConfig:
     DROP_PATH_RATE = 0.25 # default: 0.2
     WEIGHT_DECAY = 0.01
     REGULARIZATION = None
-    DROP_RATE = 0.15 # default: 0.1
-    DROP_PATH_RATE = 0.25 # default: 0.2
     USE_KAGGLE_SPECTROGRAMS = True
     USE_EEG_SPECTROGRAMS = True
     AMP = True
@@ -97,6 +95,7 @@ class ModelConfig:
     MAE_PRETRAINED_WEIGHTS = 'facebook/vit-mae-base'
     MAE_HIDDEN_DROPOUT_PROB = 0.05
     MAE_ATTENTION_DROPOUT_PROB = 0.05
+
 
 
 # AUGMENTATIONS
