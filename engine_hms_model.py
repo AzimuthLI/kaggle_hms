@@ -316,6 +316,7 @@ class CustomDataset(Dataset):
         return x, y
 
 
+#================= Models =================
 class CustomEfficientNET(nn.Module):
 
     def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
