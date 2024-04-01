@@ -1,3 +1,4 @@
+
 import os
 import numpy as np
 import pandas as pd
@@ -14,7 +15,17 @@ from torch.nn import functional as F
 from transformers import ViTMAEModel, ViTMAEConfig, ViTMAEForPreTraining
 from torch.utils.data import DataLoader, Dataset
 from tqdm.notebook import tqdm
+from glob import glob
+from pathlib import Path
+from typing import Dict, List, Union, Tuple
+from scipy.signal import butter, lfilter, freqz
+from matplotlib import pyplot as plt
+from tqdm.auto import tqdm
 
+import pywt, librosa
+import torch.nn.functional as F
+from torch.optim import Adam, SGD, AdamW
+from torch.utils.data import DataLoader, Dataset
 
 DEFAULT_VITMAE_CONFIG = {
     "architectures": [
@@ -48,10 +59,10 @@ DEFAULT_VITMAE_CONFIG = {
 class KagglePaths:
     OUTPUT_DIR = "/kaggle/working/"
     PRE_LOADED_EEGS = '/kaggle/input/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTROGRAMS = '/kaggle/input/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTOGRAMS = '/kaggle/input/brain-spectrograms/specs.npy'
     TRAIN_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/train.csv"
-    TRAIN_EEGS = "/kaggle/input/hms-harmful-brain-activity-classification/train_eegs/"
-    TRAIN_SPECTROGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/train_spectrograms/"
+    TRAIN_EEGS = "/kaggle/input/brain-eeg-spectrograms/EEG_Spectrograms/"
+    TRAIN_SPECTOGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/train_spectrograms/"
     TEST_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/test.csv"
     TEST_SPECTROGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/test_spectrograms/"
     TEST_EEGS = "/kaggle/input/hms-harmful-brain-activity-classification/test_eegs/"
@@ -60,7 +71,7 @@ class KagglePaths:
 class LocalPaths:
     OUTPUT_DIR = "./outputs/"
     PRE_LOADED_EEGS = './inputs/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTROGRAMS = './inputs/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTOGRAMS = './inputs/brain-spectrograms/specs.npy'
     TRAIN_CSV = "./inputs/hms-harmful-brain-activity-classification/train.csv"
     TRAIN_EEGS = "./inputs/hms-harmful-brain-activity-classification/train_eegs"
     TRAIN_SPECTROGRAMS = "./inputs/hms-harmful-brain-activity-classification/train_spectrograms"
@@ -408,18 +419,18 @@ class CustomVITMAE(nn.Module):
     
 
 class DualEncoderModel(nn.Module):
-    def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
+    def __init__(self, config, back_bone="tf_efficientnet_b0", num_classes: int = 6, pretrained: bool = True):
         super(DualEncoderModel, self).__init__()
 
         self.eeg_model = timm.create_model(
-            'tf_efficientnet_b2',
+            back_bone,
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
         )
 
         self.spec_model = timm.create_model(
-            'tf_efficientnet_b2',
+            back_bone,
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
@@ -465,8 +476,218 @@ class DualEncoderModel(nn.Module):
         spec_feature = self.spec_features(spec)
         x = self.custom_layers(eeg_feature + spec_feature)
         return x
+    
+class EEGFeature(nn.Module):
+    def __init__(
+        self,
+        kernels,
+        in_channels,
+        fixed_kernel_size,
+        num_classes,
+        linear_layer_features,
+        dilation=1,
+        groups=1,
+    ):
+        super(EEGFeature, self).__init__()
+        self.kernels = kernels
+        self.planes = 24
+        self.parallel_conv = nn.ModuleList()
+        self.in_channels = in_channels
 
+        for i, kernel_size in enumerate(list(self.kernels)):
+            sep_conv = nn.Conv1d(
+                in_channels=in_channels,
+                out_channels=self.planes,
+                kernel_size=(kernel_size),
+                stride=1,
+                padding=0,
+                dilation=dilation,
+                groups=groups,
+                bias=False,
+            )
+            self.parallel_conv.append(sep_conv)
 
+        self.bn1 = nn.BatchNorm1d(num_features=self.planes)
+        # self.relu = nn.ReLU(inplace=False)
+        # self.relu_1 = nn.ReLU()
+        # self.relu_2 = nn.ReLU()
+        self.relu_1 = nn.SiLU()
+        self.relu_2 = nn.SiLU()
+
+        self.conv1 = nn.Conv1d(
+            in_channels=self.planes,
+            out_channels=self.planes,
+            kernel_size=fixed_kernel_size,
+            stride=2,
+            padding=2,
+            dilation=dilation,
+            groups=groups,
+            bias=False,
+        )
+
+        self.block = self._make_resnet_layer(
+            kernel_size=fixed_kernel_size,
+            stride=1,
+            dilation=dilation,
+            groups=groups,
+            padding=fixed_kernel_size // 2,
+        )
+        self.bn2 = nn.BatchNorm1d(num_features=self.planes)
+        self.avgpool = nn.AvgPool1d(kernel_size=6, stride=6, padding=2)
+
+        self.rnn = nn.GRU(
+            input_size=self.in_channels,
+            hidden_size=128,
+            num_layers=1,
+            bidirectional=True,
+            # dropout=0.2,
+        )
+
+        self.embedding_size = linear_layer_features
+    def _make_resnet_layer(
+        self,
+        kernel_size,
+        stride,
+        dilation=1,
+        groups=1,
+        blocks=9,
+        padding=0,
+        dropout=0.0,
+    ):
+        layers = []
+        downsample = None
+        base_width = self.planes
+
+        for i in range(blocks):
+            downsampling = nn.Sequential(
+                nn.MaxPool1d(kernel_size=2, stride=2, padding=0)
+            )
+            layers.append(
+                ResNet_1D_Block(
+                    in_channels=self.planes,
+                    out_channels=self.planes,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    downsampling=downsampling,
+                    dilation=dilation,
+                    groups=groups,
+                    dropout=dropout,
+                )
+            )
+        return nn.Sequential(*layers)
+
+    def extract_features(self, x):
+        x = x.permute(0, 2, 1)
+        out_sep = []
+
+        for i in range(len(self.kernels)):
+            sep = self.parallel_conv[i](x)
+            out_sep.append(sep)
+
+        out = torch.cat(out_sep, dim=2)
+        out = self.bn1(out)
+        out = self.relu_1(out)
+        out = self.conv1(out)
+
+        out = self.block(out)
+        out = self.bn2(out)
+        out = self.relu_2(out)
+        out = self.avgpool(out)
+
+        out = out.reshape(out.shape[0], -1)
+        rnn_out, _ = self.rnn(x.permute(0, 2, 1))
+        new_rnn_h = rnn_out[:, -1, :]  # <~~
+
+        new_out = torch.cat([out, new_rnn_h], dim=1)
+        return new_out
+
+    def forward(self, x):
+        new_out = self.extract_features(x)
+        return new_out
+    def embedding_dim(self):
+        return self.embedding_size
+
+class SpecFeature(nn.Module):
+    def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
+        super(SpecFeature, self).__init__()
+        self.USE_KAGGLE_SPECTROGRAMS = True
+        self.USE_EEG_SPECTROGRAMS = True
+        self.spec_model = timm.create_model(
+            config.MODEL,
+            pretrained=pretrained,
+            drop_rate = 0.1,
+            drop_path_rate = 0.2,
+        )
+        
+        self.preprocess = torch.nn.Conv2d(4, 3, 1, bias=True)
+        
+        if config.FREEZE:
+            for i,(name, param) in enumerate(list(self.model.named_parameters())\
+                                             [0:config.NUM_FROZEN_LAYERS]):
+                param.requires_grad = False
+
+        self.spec_features = nn.Sequential(*list(self.spec_model.children())[:-2])
+        self.custom_layers = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            # nn.Linear(self.spec_model.num_features, num_classes)
+        )
+        
+
+    def __reshape_input(self, x):
+        # input size: [batch * 128 * 256 * 8]
+        
+        # --> 256*256*4
+        # spectograms = x[:, :, :, 0:4]  
+        # eegs = x[:, :, :, 4:8] 
+        # x = torch.cat([spectograms, eegs], dim=1)
+        # x = x.permute(0, 3, 1, 2)
+        
+        ## --> 512*512*3
+        # spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
+        # eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
+        # x = torch.cat([spectograms, eegs], dim=2)
+        # x = torch.cat([x, x, x], dim=3)
+        # x = x.permute(0, 3, 1, 2)
+        
+        ## --> 256*512*3 for 2 parts
+        spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
+        spec = torch.cat([spectograms, spectograms, spectograms], dim=3)
+        spec = spec.permute(0, 3, 1, 2)
+        
+        return spec
+    
+    def forward(self, x):
+        spec = self.__reshape_input(x)
+        # x = self.preprocess(x)
+        spec_feature = self.spec_features(spec)
+        spec_feature = self.custom_layers(spec_feature)
+        return spec_feature
+    def embedding_dim(self):
+        return self.spec_model.num_features
+    
+class CombineModel(nn.Module):
+    def __init__(
+        self,
+        EEGModel,
+        SpecModel,
+        num_classes=6,
+    ):
+        super(CombineModel, self).__init__()
+        self.eeg_model = EEGModel
+        self.spec_model = SpecModel
+        linear_layer_features = EEGModel.embedding_dim() + SpecModel.embedding_dim()
+        
+        self.fc = nn.Linear(in_features=linear_layer_features, out_features=num_classes)
+    def forward(self, eeg_X, spec_X):
+        eeg_feature = self.eeg_model(eeg_X)
+        spec_feature = self.spec_model(spec_X)
+        all_feature = torch.cat([eeg_feature, spec_feature], dim=1)
+        y = self.fc(all_feature)
+        return y
+
+    
 # MAE Pretraining and LightGBM functions
 class PreTrainDataset(Dataset):
 
