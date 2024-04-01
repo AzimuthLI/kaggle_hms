@@ -1,4 +1,3 @@
-
 import os
 import numpy as np
 import pandas as pd
@@ -15,17 +14,7 @@ from torch.nn import functional as F
 from transformers import ViTMAEModel, ViTMAEConfig, ViTMAEForPreTraining
 from torch.utils.data import DataLoader, Dataset
 from tqdm.notebook import tqdm
-from glob import glob
-from pathlib import Path
-from typing import Dict, List, Union, Tuple
-from scipy.signal import butter, lfilter, freqz
-from matplotlib import pyplot as plt
-from tqdm.auto import tqdm
 
-import pywt, librosa
-import torch.nn.functional as F
-from torch.optim import Adam, SGD, AdamW
-from torch.utils.data import DataLoader, Dataset
 
 DEFAULT_VITMAE_CONFIG = {
     "architectures": [
@@ -59,10 +48,10 @@ DEFAULT_VITMAE_CONFIG = {
 class KagglePaths:
     OUTPUT_DIR = "/kaggle/working/"
     PRE_LOADED_EEGS = '/kaggle/input/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTOGRAMS = '/kaggle/input/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTROGRAMS = '/kaggle/input/brain-spectrograms/specs.npy'
     TRAIN_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/train.csv"
-    TRAIN_EEGS = "/kaggle/input/brain-eeg-spectrograms/EEG_Spectrograms/"
-    TRAIN_SPECTOGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/train_spectrograms/"
+    TRAIN_EEGS = "/kaggle/input/hms-harmful-brain-activity-classification/train_eegs/"
+    TRAIN_SPECTROGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/train_spectrograms/"
     TEST_CSV = "/kaggle/input/hms-harmful-brain-activity-classification/test.csv"
     TEST_SPECTROGRAMS = "/kaggle/input/hms-harmful-brain-activity-classification/test_spectrograms/"
     TEST_EEGS = "/kaggle/input/hms-harmful-brain-activity-classification/test_eegs/"
@@ -71,7 +60,7 @@ class KagglePaths:
 class LocalPaths:
     OUTPUT_DIR = "./outputs/"
     PRE_LOADED_EEGS = './inputs/brain-eeg-spectrograms/eeg_specs.npy'
-    PRE_LOADED_SPECTOGRAMS = './inputs/brain-spectrograms/specs.npy'
+    PRE_LOADED_SPECTROGRAMS = './inputs/brain-spectrograms/specs.npy'
     TRAIN_CSV = "./inputs/hms-harmful-brain-activity-classification/train.csv"
     TRAIN_EEGS = "./inputs/hms-harmful-brain-activity-classification/train_eegs"
     TRAIN_SPECTROGRAMS = "./inputs/hms-harmful-brain-activity-classification/train_spectrograms"
@@ -92,8 +81,6 @@ class ModelConfig:
     DROP_PATH_RATE = 0.25 # default: 0.2
     WEIGHT_DECAY = 0.01
     REGULARIZATION = None
-    DROP_RATE = 0.15 # default: 0.1
-    DROP_PATH_RATE = 0.25 # default: 0.2
     USE_KAGGLE_SPECTROGRAMS = True
     USE_EEG_SPECTROGRAMS = True
     AMP = True
@@ -104,9 +91,11 @@ class ModelConfig:
     NUM_FROZEN_LAYERS = 0
     NUM_WORKERS = 0 
     MAX_GRAD_NORM = 1e7
+    DUAL_ENCODER_BACKBONE = 'tf_efficientnet_b2'
     MAE_PRETRAINED_WEIGHTS = 'facebook/vit-mae-base'
     MAE_HIDDEN_DROPOUT_PROB = 0.05
     MAE_ATTENTION_DROPOUT_PROB = 0.05
+
 
 
 # AUGMENTATIONS
@@ -372,6 +361,40 @@ class CustomEfficientNET(nn.Module):
         x = self.custom_layers(x)
         return x
 
+class SeqPool(nn.Module):
+    def __init__(self, emb_dim):
+        super().__init__()
+        self.dense = nn.Linear(emb_dim, 1)  # Dense layer to compute attention scores
+        self.softmax = nn.Softmax(dim=-1)   # Softmax to normalize scores
+
+    def forward(self, x):
+        # x shape: [batch_size, seq_len, emb_dim]
+        bs, seq_len, emb_dim = x.shape
+        identity = x
+
+        # Compute attention scores using a dense layer
+        # After dense layer, scores shape: [batch_size, seq_len, 1]
+        scores = self.dense(x)
+
+        # Normalize scores using softmax to get attention weights
+        # We permute to get the correct dimension for softmax
+        # Softmax is applied across the seq_len dimension
+        scores = scores.squeeze(-1).softmax(dim=-1)
+
+        # Before matrix multiplication, add an extra dimension to scores
+        # to match the dimensions for matmul: [batch_size, 1, seq_len]
+        scores = scores.unsqueeze(1)
+
+        # Perform weighted sum of sequence embeddings using attention weights
+        # Matrix multiplication: [batch_size, 1, seq_len] @ [batch_size, seq_len, emb_dim]
+        # Results in pooled output shape: [batch_size, 1, emb_dim]
+        pooled_output = torch.matmul(scores, identity)
+
+        # Remove the extra dimension to match the embedding dimension
+        # Final shape: [batch_size, emb_dim]
+        pooled_output = pooled_output.squeeze(1)
+
+        return pooled_output
 
 class CustomVITMAE(nn.Module):
     def __init__(self, config, num_classes=6, pretrained=None):
@@ -383,20 +406,22 @@ class CustomVITMAE(nn.Module):
         mae_config.attention_probs_dropout_prob = config.MAE_ATTENTION_DROPOUT_PROB
 
         if pretrained:
+            print(f"Loading pretrained weights from {config.MAE_PRETRAINED_WEIGHTS}")
             self.vitmae = ViTMAEModel.from_pretrained(
                 config.MAE_PRETRAINED_WEIGHTS, config=mae_config)
         else:
             self.vitmae = ViTMAEModel(config=mae_config)
 
+        self.seq_pool = SeqPool(emb_dim=self.vitmae.config.hidden_size)
         # Assumes the [CLS] token (or equivalent) is at position 0 
         # and directly usable for classification
-        # self.classifier = nn.Linear(self.vitmae.config.hidden_size, num_classes)
-        self.classifier = nn.Sequential(
-            nn.Linear(self.vitmae.config.hidden_size, 512),
-            nn.GELU(),
-            nn.Dropout(config.DROP_RATE),
-            nn.Linear(512, num_classes)
-        )
+        self.classifier = nn.Linear(self.vitmae.config.hidden_size, num_classes)
+        # self.classifier = nn.Sequential(
+        #     nn.Linear(self.vitmae.config.hidden_size, 512),
+        #     nn.GELU(),
+        #     nn.Dropout(config.DROP_RATE),
+        #     nn.Linear(512, num_classes)
+        # )
 
     def __reshape_input(self, x): # <- (N, C=8, H=128, W=256)
 
@@ -413,24 +438,28 @@ class CustomVITMAE(nn.Module):
         x = self.__reshape_input(x)
         outputs = self.vitmae(pixel_values=x)
         sequence_output = outputs.last_hidden_state
-        logits = self.classifier(sequence_output[:, 0, :])
+        # Apply SeqPool to the sequence of patch embeddings
+        pooled_output = self.seq_pool(sequence_output)
+        logits = self.classifier(pooled_output)
 
         return logits
     
 
 class DualEncoderModel(nn.Module):
-    def __init__(self, config, back_bone="tf_efficientnet_b0", num_classes: int = 6, pretrained: bool = True):
+    def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
         super(DualEncoderModel, self).__init__()
 
+        backbone = config.DUAL_ENCODER_BACKBONE
+
         self.eeg_model = timm.create_model(
-            back_bone,
+            backbone,
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
         )
 
         self.spec_model = timm.create_model(
-            back_bone,
+            backbone,
             pretrained=pretrained,
             drop_rate = 0.1,
             drop_path_rate = 0.2,
@@ -476,218 +505,8 @@ class DualEncoderModel(nn.Module):
         spec_feature = self.spec_features(spec)
         x = self.custom_layers(eeg_feature + spec_feature)
         return x
-    
-class EEGFeature(nn.Module):
-    def __init__(
-        self,
-        kernels,
-        in_channels,
-        fixed_kernel_size,
-        num_classes,
-        linear_layer_features,
-        dilation=1,
-        groups=1,
-    ):
-        super(EEGFeature, self).__init__()
-        self.kernels = kernels
-        self.planes = 24
-        self.parallel_conv = nn.ModuleList()
-        self.in_channels = in_channels
 
-        for i, kernel_size in enumerate(list(self.kernels)):
-            sep_conv = nn.Conv1d(
-                in_channels=in_channels,
-                out_channels=self.planes,
-                kernel_size=(kernel_size),
-                stride=1,
-                padding=0,
-                dilation=dilation,
-                groups=groups,
-                bias=False,
-            )
-            self.parallel_conv.append(sep_conv)
 
-        self.bn1 = nn.BatchNorm1d(num_features=self.planes)
-        # self.relu = nn.ReLU(inplace=False)
-        # self.relu_1 = nn.ReLU()
-        # self.relu_2 = nn.ReLU()
-        self.relu_1 = nn.SiLU()
-        self.relu_2 = nn.SiLU()
-
-        self.conv1 = nn.Conv1d(
-            in_channels=self.planes,
-            out_channels=self.planes,
-            kernel_size=fixed_kernel_size,
-            stride=2,
-            padding=2,
-            dilation=dilation,
-            groups=groups,
-            bias=False,
-        )
-
-        self.block = self._make_resnet_layer(
-            kernel_size=fixed_kernel_size,
-            stride=1,
-            dilation=dilation,
-            groups=groups,
-            padding=fixed_kernel_size // 2,
-        )
-        self.bn2 = nn.BatchNorm1d(num_features=self.planes)
-        self.avgpool = nn.AvgPool1d(kernel_size=6, stride=6, padding=2)
-
-        self.rnn = nn.GRU(
-            input_size=self.in_channels,
-            hidden_size=128,
-            num_layers=1,
-            bidirectional=True,
-            # dropout=0.2,
-        )
-
-        self.embedding_size = linear_layer_features
-    def _make_resnet_layer(
-        self,
-        kernel_size,
-        stride,
-        dilation=1,
-        groups=1,
-        blocks=9,
-        padding=0,
-        dropout=0.0,
-    ):
-        layers = []
-        downsample = None
-        base_width = self.planes
-
-        for i in range(blocks):
-            downsampling = nn.Sequential(
-                nn.MaxPool1d(kernel_size=2, stride=2, padding=0)
-            )
-            layers.append(
-                ResNet_1D_Block(
-                    in_channels=self.planes,
-                    out_channels=self.planes,
-                    kernel_size=kernel_size,
-                    stride=stride,
-                    padding=padding,
-                    downsampling=downsampling,
-                    dilation=dilation,
-                    groups=groups,
-                    dropout=dropout,
-                )
-            )
-        return nn.Sequential(*layers)
-
-    def extract_features(self, x):
-        x = x.permute(0, 2, 1)
-        out_sep = []
-
-        for i in range(len(self.kernels)):
-            sep = self.parallel_conv[i](x)
-            out_sep.append(sep)
-
-        out = torch.cat(out_sep, dim=2)
-        out = self.bn1(out)
-        out = self.relu_1(out)
-        out = self.conv1(out)
-
-        out = self.block(out)
-        out = self.bn2(out)
-        out = self.relu_2(out)
-        out = self.avgpool(out)
-
-        out = out.reshape(out.shape[0], -1)
-        rnn_out, _ = self.rnn(x.permute(0, 2, 1))
-        new_rnn_h = rnn_out[:, -1, :]  # <~~
-
-        new_out = torch.cat([out, new_rnn_h], dim=1)
-        return new_out
-
-    def forward(self, x):
-        new_out = self.extract_features(x)
-        return new_out
-    def embedding_dim(self):
-        return self.embedding_size
-
-class SpecFeature(nn.Module):
-    def __init__(self, config, num_classes: int = 6, pretrained: bool = True):
-        super(SpecFeature, self).__init__()
-        self.USE_KAGGLE_SPECTROGRAMS = True
-        self.USE_EEG_SPECTROGRAMS = True
-        self.spec_model = timm.create_model(
-            config.MODEL,
-            pretrained=pretrained,
-            drop_rate = 0.1,
-            drop_path_rate = 0.2,
-        )
-        
-        self.preprocess = torch.nn.Conv2d(4, 3, 1, bias=True)
-        
-        if config.FREEZE:
-            for i,(name, param) in enumerate(list(self.model.named_parameters())\
-                                             [0:config.NUM_FROZEN_LAYERS]):
-                param.requires_grad = False
-
-        self.spec_features = nn.Sequential(*list(self.spec_model.children())[:-2])
-        self.custom_layers = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            # nn.Linear(self.spec_model.num_features, num_classes)
-        )
-        
-
-    def __reshape_input(self, x):
-        # input size: [batch * 128 * 256 * 8]
-        
-        # --> 256*256*4
-        # spectograms = x[:, :, :, 0:4]  
-        # eegs = x[:, :, :, 4:8] 
-        # x = torch.cat([spectograms, eegs], dim=1)
-        # x = x.permute(0, 3, 1, 2)
-        
-        ## --> 512*512*3
-        # spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
-        # eegs = torch.cat([x[:, :, :, i:i+1] for i in range(4,8)], dim=1)
-        # x = torch.cat([spectograms, eegs], dim=2)
-        # x = torch.cat([x, x, x], dim=3)
-        # x = x.permute(0, 3, 1, 2)
-        
-        ## --> 256*512*3 for 2 parts
-        spectograms = torch.cat([x[:, :, :, i:i+1] for i in range(4)], dim=1) 
-        spec = torch.cat([spectograms, spectograms, spectograms], dim=3)
-        spec = spec.permute(0, 3, 1, 2)
-        
-        return spec
-    
-    def forward(self, x):
-        spec = self.__reshape_input(x)
-        # x = self.preprocess(x)
-        spec_feature = self.spec_features(spec)
-        spec_feature = self.custom_layers(spec_feature)
-        return spec_feature
-    def embedding_dim(self):
-        return self.spec_model.num_features
-    
-class CombineModel(nn.Module):
-    def __init__(
-        self,
-        EEGModel,
-        SpecModel,
-        num_classes=6,
-    ):
-        super(CombineModel, self).__init__()
-        self.eeg_model = EEGModel
-        self.spec_model = SpecModel
-        linear_layer_features = EEGModel.embedding_dim() + SpecModel.embedding_dim()
-        
-        self.fc = nn.Linear(in_features=linear_layer_features, out_features=num_classes)
-    def forward(self, eeg_X, spec_X):
-        eeg_feature = self.eeg_model(eeg_X)
-        spec_feature = self.spec_model(spec_X)
-        all_feature = torch.cat([eeg_feature, spec_feature], dim=1)
-        y = self.fc(all_feature)
-        return y
-
-    
 # MAE Pretraining and LightGBM functions
 class PreTrainDataset(Dataset):
 
@@ -758,8 +577,9 @@ def generate_pretrain_features(df, all_specs, all_eegs, pretrained_path, device,
 
     dataset = PreTrainDataset(df, all_specs, all_eegs, mode=mode)
     dataloader = DataLoader(dataset, batch_size=16, shuffle=False, collate_fn=reshape_pretrain_input)
-    
+
     mae_config = ViTMAEConfig.from_dict(DEFAULT_VITMAE_CONFIG)
+
     ft_extractor = ViTMAEForPreTraining.from_pretrained(pretrained_path, config=mae_config)
     ft_extractor = ft_extractor.to(device)
 
